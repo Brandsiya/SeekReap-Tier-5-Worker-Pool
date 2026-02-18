@@ -1,0 +1,8 @@
+nohup: ignoring input
+Worker-2 received shutdown signal
+Worker-2 exiting
+Worker-1 received shutdown signal
+Worker-1 exiting
+Worker-3 received shutdown signal
+Worker-3 exiting
+MainProcess received shutdown signal
