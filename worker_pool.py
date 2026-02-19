@@ -93,15 +93,26 @@ def process_job(conn, job):
         conn.commit()
 
 def worker_loop():
-    with closing(psycopg2.connect(**DB_CONFIG)) as conn:
-        while running:
+    global running
+    conn = None
+    while running:
+        try:
+            if not conn:
+                conn = psycopg2.connect(**DB_CONFIG)
             job = fetch_job(conn)
             if job:
                 process_job(conn, job)
             else:
                 time.sleep(FETCH_SLEEP)
-        print(f"{current_process().name} exiting")
-
+        except psycopg2.OperationalError as e:
+            print(f"{current_process().name}: DB connection lost: {e}, reconnecting...")
+            if conn:
+                conn.close()
+            conn = None
+            time.sleep(2)
+    if conn:
+        conn.close()
+    print(f"{current_process().name} exiting")
 # --- Start worker pool ---
 if __name__ == "__main__":
     processes = []
