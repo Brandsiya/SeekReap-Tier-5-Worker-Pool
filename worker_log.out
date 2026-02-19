@@ -1,33 +1,110 @@
-Process Worker-3:
-Process Worker-2:
-Traceback (most recent call last):
-Traceback (most recent call last):
-  File "/usr/lib/python3.10/multiprocessing/process.py", line 314, in _bootstrap
-    self.run()
-  File "/usr/lib/python3.10/multiprocessing/process.py", line 314, in _bootstrap
-    self.run()
-  File "/usr/lib/python3.10/multiprocessing/process.py", line 108, in run
-    self._target(*self._args, **self._kwargs)
-  File "/usr/lib/python3.10/multiprocessing/process.py", line 108, in run
-    self._target(*self._args, **self._kwargs)
-  File "<stdin>", line 54, in worker_loop
-  File "<stdin>", line 54, in worker_loop
-  File "/usr/local/lib/python3.10/dist-packages/psycopg2/__init__.py", line 122, in connect
-    conn = _connect(dsn, connection_factory=connection_factory, **kwasync)
-  File "/usr/local/lib/python3.10/dist-packages/psycopg2/__init__.py", line 122, in connect
-    conn = _connect(dsn, connection_factory=connection_factory, **kwasync)
-psycopg2.OperationalError: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+nohup: ignoring input
+Worker pool started
+Processing job 36 (final_ssl_test)
+Completed job 36
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
 
-psycopg2.OperationalError: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
 
-Process Worker-1:
-Traceback (most recent call last):
-  File "/usr/lib/python3.10/multiprocessing/process.py", line 314, in _bootstrap
-    self.run()
-  File "/usr/lib/python3.10/multiprocessing/process.py", line 108, in run
-    self._target(*self._args, **self._kwargs)
-  File "<stdin>", line 54, in worker_loop
-  File "/usr/local/lib/python3.10/dist-packages/psycopg2/__init__.py", line 122, in connect
-    conn = _connect(dsn, connection_factory=connection_factory, **kwasync)
-psycopg2.OperationalError: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+DB connection lost or error: connection to server at "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" (44.211.114.173), port 5432 failed: SSL SYSCALL error: EOF detected
 
+DB connection lost or error: connection to server at "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" (98.91.36.187), port 5432 failed: server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+
+DB connection lost or error: connection to server at "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" (44.211.114.173), port 5432 failed: SSL SYSCALL error: EOF detected
+
+DB connection lost or error: connection to server at "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" (44.211.114.173), port 5432 failed: could not receive data from server: Software caused connection abort
+SSL SYSCALL error: Software caused connection abort
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not receive data from server: Software caused connection abort
+SSL SYSCALL error: Software caused connection abort
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+DB connection lost or error: could not translate host name "ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech" to address: Temporary failure in name resolution
+
+Processing job 37 (test_job)
+DB connection lost or error: could not receive data from server: Software caused connection abort
+SSL SYSCALL error: Software caused connection abort
+
+Processing job 1 (test_content_001)
+Completed job 1
+Processing job 2 (real_content_001)
+Completed job 2
+Processing job 4 (real_content_003)
+Completed job 4
+Processing job 6 (test_content_002)
+Completed job 6
+Processing job 8 (test_content_004)
+Completed job 8
