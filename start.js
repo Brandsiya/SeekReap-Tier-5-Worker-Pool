@@ -25,32 +25,18 @@ app.use(express.json());
 async function processJob(job) {
   console.log(`Processing job ${job.job_id}: ${job.content_id}`);
   try {
-    // Simulate processing
     await new Promise(r => setTimeout(r, 2000));
-
-    // Mark job as completed
-    await client.query(
-      'UPDATE job_queue SET status=$1, completed_at=NOW() WHERE job_id=$2',
-      ['completed', job.job_id]
-    );
-
-    // Insert result into content_results
+    await client.query("UPDATE job_queue SET status=$1, completed_at=NOW() WHERE job_id=$2", ["completed", job.job_id]);
     const contentUrl = `https://cdn.example.com/${job.content_id}.mp4`;
-    await client.query(
-      'INSERT INTO content_results (job_id, creator_id, job_type, result_url) VALUES ($1,$2,$3,$4)',
-      [job.job_id, job.creator_id, job.job_type, contentUrl]
-    );
-
+    await client.query("INSERT INTO content_results (job_id, creator_id, job_type, result_url) VALUES ($1,$2,$3,$4)", [job.job_id, job.creator_id, job.job_type, contentUrl]);
     console.log(`Job ${job.job_id} completed and result inserted`);
   } catch (err) {
     console.error(`Job ${job.job_id} failed`, err);
-    await client.query(
-      'UPDATE job_queue SET status=$1 WHERE job_id=$2',
-      ['failed', job.job_id]
-    );
+    await client.query("UPDATE job_queue SET status=$1 WHERE job_id=$2", ["failed", job.job_id]);
   }
 }
 
+// Run worker asynchronously
 async function runWorker() {
   await client.connect();
   console.log('Worker connected to DB');
