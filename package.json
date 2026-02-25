@@ -1,6 +1,15 @@
 {
+  "name": "seekreap-tier5-worker-pool",
+  "version": "2.0.0",
+  "description": "SeekReap Tier-5 Worker Pool",
+  "main": "start.js",
+  "scripts": {
+    "start": "node start.js",
+    "worker": "node worker_pool.js"
+  },
   "dependencies": {
-    "express": "^5.2.1",
-    "pg": "^8.18.0"
+    "express": "^4.18.2",
+    "pg": "^8.11.3",
+    "axios": "^1.6.2"
   }
 }
