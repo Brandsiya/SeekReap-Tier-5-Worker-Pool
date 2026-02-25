@@ -1,0 +1,1 @@
+# Force Redis endpoints deploy
