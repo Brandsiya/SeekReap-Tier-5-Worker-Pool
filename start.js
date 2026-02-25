@@ -8,18 +8,39 @@ if (!DATABASE_URL) {
   process.exit(1);
 }
 
-// PostgreSQL client
-const client = new Client({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
-
 // Express server
 const app = express();
 app.use(express.json());
 
 // Configuration
 const TIER4_URL = process.env.TIER4_URL || 'http://localhost:10000';
+
+// Global client variable
+let client;
+
+// Function to create and connect a new client
+async function createClient() {
+  const newClient = new Client({
+    connectionString: DATABASE_URL,
+    ssl: { rejectUnauthorized: false },
+    // Add connection timeout and keep-alive
+    connectionTimeoutMillis: 10000,
+    idle_in_transaction_session_timeout: 30000
+  });
+  
+  await newClient.connect();
+  console.log('🔌 New database connection established');
+  
+  // Handle errors on this client
+  newClient.on('error', (err) => {
+    console.error('Database client error:', err.message);
+    console.log('Attempting to reconnect...');
+    // Don't exit, just mark as disconnected
+    client = null;
+  });
+  
+  return newClient;
+}
 
 // ---------------- Worker ----------------
 async function processJob(job) {
@@ -58,6 +79,11 @@ async function processJob(job) {
     console.log(`   📊 Confidence: ${tier4Response.data.confidence}`);
     console.log(`   📝 Appeal: ${tier4Response.data.appeal_text || 'None'}`);
     
+    // Ensure we have a database connection
+    if (!client) {
+      client = await createClient();
+    }
+    
     // Store results in database
     const result = await client.query(
       `INSERT INTO content_results 
@@ -91,21 +117,43 @@ async function processJob(job) {
       console.error('   Response data:', err.response.data);
     }
     
-    // Mark job as failed
-    await client.query(
-      'UPDATE job_queue SET status=$1, failure_reason=$2 WHERE job_id=$3',
-      ['failed', err.message, job.job_id]
-    );
+    // Try to mark job as failed, but if DB is down, just log it
+    try {
+      if (client) {
+        await client.query(
+          'UPDATE job_queue SET status=$1, failure_reason=$2 WHERE job_id=$3',
+          ['failed', err.message, job.job_id]
+        );
+      }
+    } catch (dbErr) {
+      console.error('   Could not update job status in DB:', dbErr.message);
+    }
   }
 }
 
 async function runWorker() {
-  await client.connect();
-  console.log('🔌 Worker connected to DB');
+  // Initial connection
+  try {
+    client = await createClient();
+    console.log('✅ Initial database connection established');
+  } catch (err) {
+    console.error('❌ Failed to connect to database:', err.message);
+    process.exit(1);
+  }
+  
   console.log(`🌐 Tier-4 URL: ${TIER4_URL}\n`);
   
   while (true) {
     try {
+      // Check if we have a valid connection
+      if (!client) {
+        console.log('⚠️ Database connection lost, reconnecting...');
+        client = await createClient();
+      }
+      
+      // Test the connection with a simple query
+      await client.query('SELECT 1');
+      
       const res = await client.query(
         "SELECT job_id, creator_id, content_id, job_type, params FROM job_queue WHERE status='pending' ORDER BY job_id ASC LIMIT 1"
       );
@@ -128,6 +176,16 @@ async function runWorker() {
       
     } catch (err) {
       console.error('Worker loop error:', err.message);
+      
+      // If database error, reset client
+      if (err.code === 'ECONNREFUSED' || err.code === 'ECONNABORTED' || err.code === '57P01') {
+        console.log('⚠️ Database connection issue, will reconnect on next iteration');
+        try {
+          await client?.end();
+        } catch (e) {}
+        client = null;
+      }
+      
       await new Promise(r => setTimeout(r, 5000));
     }
   }
@@ -136,6 +194,10 @@ async function runWorker() {
 // ---------------- Server ----------------
 app.get('/creator/:id/jobs', async (req, res) => {
   try {
+    if (!client) {
+      client = await createClient();
+    }
+    
     const results = await client.query(
       'SELECT * FROM content_results WHERE creator_id = $1 ORDER BY processed_at DESC',
       [req.params.id]
@@ -152,6 +214,7 @@ app.get('/health', (req, res) => {
     status: 'healthy', 
     tier: 5,
     tier4_url: TIER4_URL,
+    db_connected: !!client,
     timestamp: new Date().toISOString()
   });
 });
@@ -159,6 +222,10 @@ app.get('/health', (req, res) => {
 // Test endpoint to create a test job
 app.post('/test-job', async (req, res) => {
   try {
+    if (!client) {
+      client = await createClient();
+    }
+    
     const { creator_id = 1, content_id = `test-${Date.now()}`, job_type = 'video' } = req.body;
     
     const result = await client.query(
@@ -174,11 +241,12 @@ app.post('/test-job', async (req, res) => {
       note: 'Worker will process this job automatically'
     });
   } catch (err) {
+    console.error('Error creating test job:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`🚀 Tier-5 server running on port ${PORT}`);
   console.log(`📡 Tier-4 URL: ${TIER4_URL}`);
@@ -186,10 +254,12 @@ app.listen(PORT, () => {
   console.log(`   GET  /health`);
   console.log(`   GET  /creator/:id/jobs`);
   console.log(`   POST /test-job`);
+  console.log(`   🔄 Auto-reconnect enabled for database`);
 });
 
 // Run worker asynchronously
 runWorker().catch(err => { 
   console.error('Worker error', err); 
-  process.exit(1); 
+  // Don't exit immediately on worker error
+  setTimeout(() => process.exit(1), 1000);
 });
