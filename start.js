@@ -13,28 +13,21 @@ if (!DATABASE_URL) {
   process.exit(1);
 }
 
-// Redis connection from Render
+// Redis connection
 const REDIS_CONFIG = {
   host: process.env.REDIS_HOST || 'localhost',
   port: parseInt(process.env.REDIS_PORT || '6379'),
   password: process.env.REDIS_PASSWORD,
   maxRetriesPerRequest: null,
   enableReadyCheck: false,
-  retryStrategy: (times) => {
-    return Math.min(times * 50, 2000);
-  }
+  retryStrategy: (times) => Math.min(times * 50, 2000)
 };
 
 console.log('🔄 Connecting to Redis...');
 const redisConnection = new Redis(REDIS_CONFIG);
 
-redisConnection.on('connect', () => {
-  console.log('✅ Redis connected successfully');
-});
-
-redisConnection.on('error', (err) => {
-  console.error('❌ Redis connection error:', err.message);
-});
+redisConnection.on('connect', () => console.log('✅ Redis connected'));
+redisConnection.on('error', (err) => console.error('❌ Redis error:', err.message));
 
 // PostgreSQL client
 const pgClient = new Client({
@@ -46,47 +39,37 @@ const pgClient = new Client({
 const app = express();
 app.use(express.json());
 
-// Configuration
 const TIER4_URL = process.env.TIER4_URL || 'http://localhost:10000';
 
 // =====================================================
-// Redis Queue Setup
+// Redis Queue Setup with Better Retry Options
 // =====================================================
 const jobQueue = new Queue('content-moderation', {
   connection: redisConnection,
   defaultJobOptions: {
-    attempts: 3,
+    attempts: 5,  // Increased from 3
     backoff: {
-      type: 'exponential',
-      delay: 1000
+      type: 'exponential',  // Exponential backoff
+      delay: 1000  // Start with 1 second, then 2, 4, 8, 16
     },
     removeOnComplete: 100,
     removeOnFail: 200
   }
 });
 
-const queueEvents = new QueueEvents('content-moderation', {
-  connection: redisConnection
-});
+const queueEvents = new QueueEvents('content-moderation', { connection: redisConnection });
 
-// Monitor queue events
-queueEvents.on('completed', ({ jobId }) => {
-  console.log(`✅ Redis job ${jobId} completed`);
-});
-
-queueEvents.on('failed', ({ jobId, failedReason }) => {
-  console.error(`❌ Redis job ${jobId} failed:`, failedReason);
-});
+queueEvents.on('completed', ({ jobId }) => console.log(`✅ Redis job ${jobId} completed`));
+queueEvents.on('failed', ({ jobId, failedReason }) => console.error(`❌ Redis job ${jobId} failed:`, failedReason));
 
 // =====================================================
-// Worker Setup
+// Worker with Enhanced Error Handling
 // =====================================================
 const worker = new Worker('content-moderation', async (job) => {
-  console.log(`\n📦 Processing Redis job ${job.id}: ${job.data.content_id}`);
-  console.log(`   Attempt ${job.attemptsMade + 1}/${job.opts.attempts}`);
-  
+  console.log(`\n📦 Processing Redis job ${job.id} (attempt ${job.attemptsMade + 1}/${job.opts.attempts})`);
+  console.log(`   Content: ${job.data.content_id}`);
+
   try {
-    // Create envelope
     const envelope = {
       id: `job-${job.data.job_id}-${Date.now()}`,
       timestamp: Date.now() / 1000,
@@ -103,73 +86,80 @@ const worker = new Worker('content-moderation', async (job) => {
       signature: `tier2-semantic-job-${Date.now()}-${Math.random().toString(36).substring(7)}`,
       metadata: {
         source: "tier5_redis_worker",
-        redis_job_id: job.id
+        redis_job_id: job.id,
+        attempt: job.attemptsMade + 1
       }
     };
 
     console.log(`   📨 Sending to Tier-4: ${TIER4_URL}`);
 
-    // Send to Tier-4
-    const tier4Response = await axios.post(`${TIER4_URL}/process-envelope`, envelope, {
-      timeout: 30000,
-      headers: { 'Content-Type': 'application/json' }
-    });
+    try {
+      const tier4Response = await axios.post(`${TIER4_URL}/process-envelope`, envelope, {
+        timeout: 30000,
+        headers: { 'Content-Type': 'application/json' }
+      });
 
-    console.log(`   ✅ Tier-4 responded: ${tier4Response.data.decision || 'unknown'}`);
+      console.log(`   ✅ Tier-4 responded: ${tier4Response.data.decision || 'unknown'}`);
 
-    // Update PostgreSQL job status
-    await pgClient.query(
-      `UPDATE job_queue 
-       SET status=$1, completed_at=NOW(), redis_job_id=$2 
-       WHERE job_id=$3`,
-      ['completed', job.id, job.data.job_id]
-    );
-
-    // If there's a submission_id, update content_submissions
-    if (job.data.submission_id) {
+      // Update PostgreSQL
       await pgClient.query(
-        `UPDATE content_submissions 
-         SET status='processing' 
-         WHERE submission_id=$1`,
-        [job.data.submission_id]
+        `UPDATE job_queue 
+         SET status=$1, completed_at=NOW(), redis_job_id=$2, attempts=$3
+         WHERE job_id=$4`,
+        ['completed', job.id, job.attemptsMade + 1, job.data.job_id]
       );
+
+      if (job.data.submission_id) {
+        await pgClient.query(
+          `UPDATE content_submissions SET status='processing' WHERE submission_id=$1`,
+          [job.data.submission_id]
+        );
+      }
+
+      return tier4Response.data;
+
+    } catch (err) {
+      // Handle 429 rate limiting specially
+      if (err.response && err.response.status === 429) {
+        console.log(`   ⏳ Rate limited (429), will retry with backoff...`);
+        // Update PostgreSQL with retry info
+        await pgClient.query(
+          `UPDATE job_queue 
+           SET attempts=$1, failure_reason=$2, redis_job_id=$3
+           WHERE job_id=$4`,
+          [job.attemptsMade + 1, `Rate limited, retry ${job.attemptsMade + 1}/${job.opts.attempts}`, job.id, job.data.job_id]
+        );
+        // Throw to trigger BullMQ retry with backoff
+        throw err;
+      }
+      
+      // Other errors
+      console.error(`   ❌ Job failed:`, err.message);
+      await pgClient.query(
+        `UPDATE job_queue 
+         SET failure_reason=$1, redis_job_id=$2, attempts=$3
+         WHERE job_id=$4`,
+        [err.message, job.id, job.attemptsMade + 1, job.data.job_id]
+      );
+      throw err;
     }
 
-    return tier4Response.data;
-
   } catch (err) {
-    console.error(`   ❌ Job ${job.id} failed:`, err.message);
-    
-    // Update PostgreSQL with failure
-    await pgClient.query(
-      `UPDATE job_queue 
-       SET failure_reason=$1, redis_job_id=$2 
-       WHERE job_id=$3`,
-      [err.message, job.id, job.data.job_id]
-    );
-    
-    throw err; // BullMQ will handle retries
+    console.error(`   ❌ Worker error:`, err.message);
+    throw err; // BullMQ handles retries
   }
 }, {
   connection: redisConnection,
-  concurrency: 5, // Process 5 jobs in parallel
+  concurrency: 5,
   limiter: {
-    max: 10,      // Max 10 jobs per second
+    max: 10,
     duration: 1000
   }
 });
 
-worker.on('active', (job) => {
-  console.log(`🔄 Worker started job ${job.id}`);
-});
-
-worker.on('completed', (job) => {
-  console.log(`✅ Worker completed job ${job.id}`);
-});
-
-worker.on('failed', (job, err) => {
-  console.error(`❌ Worker failed job ${job.id}:`, err.message);
-});
+worker.on('active', (job) => console.log(`🔄 Worker started job ${job.id}`));
+worker.on('completed', (job) => console.log(`✅ Worker completed job ${job.id}`));
+worker.on('failed', (job, err) => console.error(`❌ Worker failed job ${job.id}:`, err.message));
 
 // =====================================================
 // Database connection
@@ -198,8 +188,6 @@ async function initDatabase() {
 // =====================================================
 // API Endpoints
 // =====================================================
-
-// Health check
 app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
@@ -211,7 +199,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Get queue stats
 app.get('/api/queue/stats', async (req, res) => {
   try {
     const [waiting, active, completed, failed] = await Promise.all([
@@ -220,25 +207,16 @@ app.get('/api/queue/stats', async (req, res) => {
       jobQueue.getCompletedCount(),
       jobQueue.getFailedCount()
     ]);
-    
-    res.json({
-      waiting,
-      active,
-      completed,
-      failed,
-      total: waiting + active + completed + failed
-    });
+    res.json({ waiting, active, completed, failed, total: waiting + active + completed + failed });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Add job to Redis queue (instead of PostgreSQL)
 app.post('/api/redis-job', async (req, res) => {
   try {
     const { creator_id, content_id, job_type, params, submission_id } = req.body;
     
-    // Add to Redis queue
     const redisJob = await jobQueue.add('process', {
       creator_id: creator_id || 1,
       content_id: content_id || `redis-${Date.now()}`,
@@ -248,62 +226,47 @@ app.post('/api/redis-job', async (req, res) => {
       created_at: new Date().toISOString()
     }, {
       priority: req.body.priority || 1,
-      attempts: req.body.attempts || 3
+      attempts: 5  // Match the default
     });
     
-    // Also add to PostgreSQL for persistence
     const pgResult = await pgClient.query(
-      `INSERT INTO job_queue (creator_id, content_id, job_type, status, params, created_at, redis_job_id)
-       VALUES ($1, $2, $3, 'pending', $4, NOW(), $5)
+      `INSERT INTO job_queue (creator_id, content_id, job_type, status, params, created_at, redis_job_id, attempts)
+       VALUES ($1, $2, $3, 'pending', $4, NOW(), $5, 0)
        RETURNING *`,
       [creator_id || 1, content_id || `redis-${Date.now()}`, job_type || 'video', params || {}, redisJob.id]
     );
     
-    res.json({
-      success: true,
-      redis_job_id: redisJob.id,
-      pg_job: pgResult.rows[0],
-      message: 'Job added to Redis queue'
-    });
+    res.json({ success: true, redis_job_id: redisJob.id, pg_job: pgResult.rows[0], message: 'Job added to Redis queue' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Test endpoint
 app.post('/test-job', async (req, res) => {
   try {
     const { creator_id = 1, content_id = `test-${Date.now()}`, job_type = 'video' } = req.body;
     
-    // Add to Redis queue
     const redisJob = await jobQueue.add('process', {
       creator_id,
       content_id,
       job_type,
       params: { test: true },
       created_at: new Date().toISOString()
-    });
+    }, { attempts: 5 });
     
-    // Add to PostgreSQL
     const result = await pgClient.query(
-      `INSERT INTO job_queue (creator_id, content_id, job_type, status, params, created_at, redis_job_id)
-       VALUES ($1, $2, $3, 'pending', $4, NOW(), $5)
+      `INSERT INTO job_queue (creator_id, content_id, job_type, status, params, created_at, redis_job_id, attempts)
+       VALUES ($1, $2, $3, 'pending', $4, NOW(), $5, 0)
        RETURNING *`,
       [creator_id, content_id, job_type, { test: true }, redisJob.id]
     );
     
-    res.json({
-      message: 'Test job created',
-      job: result.rows[0],
-      redis_job_id: redisJob.id,
-      note: 'Worker will process this job via Redis'
-    });
+    res.json({ message: 'Test job created', job: result.rows[0], redis_job_id: redisJob.id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Get jobs from PostgreSQL (for backward compatibility)
 app.get('/creator/:id/jobs', async (req, res) => {
   try {
     const results = await pgClient.query(
@@ -312,7 +275,6 @@ app.get('/creator/:id/jobs', async (req, res) => {
     );
     res.json(results.rows);
   } catch (err) {
-    console.error('Error fetching jobs:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -329,15 +291,15 @@ app.listen(PORT, async () => {
   console.log(`   GET  /health`);
   console.log(`   GET  /creator/:id/jobs`);
   console.log(`   POST /test-job`);
-  console.log(`   POST /api/redis-job (NEW - Redis queue)`);
-  console.log(`   GET  /api/queue/stats (NEW - Queue metrics)`);
+  console.log(`   POST /api/redis-job (Redis queue)`);
+  console.log(`   GET  /api/queue/stats (Queue metrics)`);
   console.log(`   🔄 Auto-reconnect enabled`);
   console.log(`   🔄 Redis queue with 5 concurrent workers`);
+  console.log(`   🔄 Exponential backoff (1s,2s,4s,8s,16s)`);
   
   await initDatabase();
 });
 
-// Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, closing connections...');
   await worker.close();
