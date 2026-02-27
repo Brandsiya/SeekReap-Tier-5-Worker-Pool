@@ -2,57 +2,7 @@ const { Client } = require('pg');
 const express = require('express');
 const axios = require('axios');
 const { Worker, Queue, QueueEvents } = require('bullmq');
-
-// Get Redis URL from environment
-const redisUrl = process.env.REDIS_URL;
-
-if (!redisUrl) {
-  console.error('❌ FATAL: REDIS_URL environment variable not set!');
-  console.error('   Please set REDIS_URL in your Render environment variables');
-  process.exit(1);
-}
-
-// Log Redis connection (hide password)
-console.log(`[35m🔌 Connecting to Redis at: ${redisUrl.split('@')[1] || redisUrl.replace(/redis://[^@]+@/, 'redis://****@')}[0m`);
-
-const redisConnection = new Redis(redisUrl, {
-  tls: {
-    rejectUnauthorized: false  // Required for Render Redis
-  },
-  maxRetriesPerRequest: null,
-  enableReadyCheck: false,
-  retryStrategy: (times) => {
-    // Exponential backoff
-    const delay = Math.min(times * 100, 3000);
-    console.log(`[33m🔄 Redis reconnecting in ${delay}ms (attempt ${times})[0m`);
-    return delay;
-  }
-});
-
-redisConnection.on('connect', () => {
-  console.log('[32m✅ Redis connected successfully![0m');
-  console.log(`[32m   Connected to: ${redisUrl.split('@')[1] || 'Redis'}[0m`);
-});
-
-redisConnection.on('ready', () => {
-  console.log('[32m✅ Redis client ready[0m');
-});
-
-redisConnection.on('error', (err) => {
-  console.error('[31m❌ Redis error:[0m', err.message);
-  if (err.code === 'ECONNREFUSED') {
-    console.error('   Connection refused - check REDIS_URL and network settings');
-    console.error('   Make sure Redis is running and accessible');
-  }
-});
-
-redisConnection.on('reconnecting', () => {
-  console.log('[33m🔄 Redis reconnecting...[0m');
-});
-
-redisConnection.on('end', () => {
-  console.log('[33m⚠️ Redis connection ended[0m');
-});
+const Redis = require('ioredis');
 
 // =====================================================
 // Configuration
@@ -63,7 +13,6 @@ if (!DATABASE_URL) {
   process.exit(1);
 }
 
-// Redis connection
 // Get Redis URL from environment
 const redisUrl = process.env.REDIS_URL;
 
@@ -74,7 +23,8 @@ if (!redisUrl) {
 }
 
 // Log Redis connection (hide password)
-console.log(`🔌 Connecting to Redis at: ${redisUrl.split('@')[1] || redisUrl.replace(/redis:\/\/[^@]+@/, 'redis://****@')}`);
+const maskedUrl = redisUrl.replace(/redis:\/\/[^@]+@/, 'redis://****@');
+console.log(`🔌 Connecting to Redis at: ${maskedUrl.split('@')[1] || maskedUrl}`);
 
 const redisConnection = new Redis(redisUrl, {
   tls: {
@@ -92,7 +42,8 @@ const redisConnection = new Redis(redisUrl, {
 
 redisConnection.on('connect', () => {
   console.log('✅ Redis connected successfully!');
-  console.log(`   Connected to: ${redisUrl.split('@')[1] || 'Redis'}`);
+  const displayHost = redisUrl.split('@')[1] || 'Redis';
+  console.log(`   Connected to: ${displayHost}`);
 });
 
 redisConnection.on('ready', () => {
@@ -114,13 +65,17 @@ redisConnection.on('reconnecting', () => {
 redisConnection.on('end', () => {
   console.log('⚠️ Redis connection ended');
 });
-redisConnection.on('connect', () => console.log('✅ Redis connected'));
-redisConnection.on('error', (err) => console.error('❌ Redis error:', err.message));
 
-// PostgreSQL client
+// PostgreSQL client with better error handling
 const pgClient = new Client({
   connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  connectionTimeoutMillis: 10000,
+  idle_in_transaction_session_timeout: 30000
+});
+
+pgClient.on('error', (err) => {
+  console.error('❌ PostgreSQL client error:', err.message);
 });
 
 // Express server
@@ -128,6 +83,7 @@ const app = express();
 app.use(express.json());
 
 const TIER4_URL = process.env.TIER4_URL || 'http://localhost:10000';
+console.log(`📡 Tier-4 URL configured: ${TIER4_URL}`);
 
 // =====================================================
 // Redis Queue Setup with Better Retry Options
@@ -135,10 +91,10 @@ const TIER4_URL = process.env.TIER4_URL || 'http://localhost:10000';
 const jobQueue = new Queue('content-moderation', {
   connection: redisConnection,
   defaultJobOptions: {
-    attempts: 5,  // Increased from 3
+    attempts: 5,
     backoff: {
-      type: 'exponential',  // Exponential backoff
-      delay: 1000  // Start with 1 second, then 2, 4, 8, 16
+      type: 'exponential',
+      delay: 1000
     },
     removeOnComplete: 100,
     removeOnFail: 200
@@ -191,7 +147,7 @@ const worker = new Worker('content-moderation', async (job) => {
 
       // Update PostgreSQL
       await pgClient.query(
-        `UPDATE job_queue 
+        `UPDATE job_queue
          SET status=$1, completed_at=NOW(), redis_job_id=$2, attempts=$3
          WHERE job_id=$4`,
         ['completed', job.id, job.attemptsMade + 1, job.data.job_id]
@@ -212,7 +168,7 @@ const worker = new Worker('content-moderation', async (job) => {
         console.log(`   ⏳ Rate limited (429), will retry with backoff...`);
         // Update PostgreSQL with retry info
         await pgClient.query(
-          `UPDATE job_queue 
+          `UPDATE job_queue
            SET attempts=$1, failure_reason=$2, redis_job_id=$3
            WHERE job_id=$4`,
           [job.attemptsMade + 1, `Rate limited, retry ${job.attemptsMade + 1}/${job.opts.attempts}`, job.id, job.data.job_id]
@@ -220,11 +176,11 @@ const worker = new Worker('content-moderation', async (job) => {
         // Throw to trigger BullMQ retry with backoff
         throw err;
       }
-      
+
       // Other errors
       console.error(`   ❌ Job failed:`, err.message);
       await pgClient.query(
-        `UPDATE job_queue 
+        `UPDATE job_queue
          SET failure_reason=$1, redis_job_id=$2, attempts=$3
          WHERE job_id=$4`,
         [err.message, job.id, job.attemptsMade + 1, job.data.job_id]
@@ -255,12 +211,12 @@ worker.on('failed', (job, err) => console.error(`❌ Worker failed job ${job.id}
 async function initDatabase() {
   let connected = false;
   let retries = 5;
-  
+
   while (!connected && retries > 0) {
     try {
       await pgClient.connect();
       connected = true;
-      console.log(`✅ PostgreSQL connected (after ${5-retries} retries)`);
+      console.log(`✅ PostgreSQL connected (after ${5 - retries} retries)`);
     } catch (err) {
       retries--;
       console.log(`⚠️ PostgreSQL connection failed, retries left: ${retries}`);
@@ -304,7 +260,7 @@ app.get('/api/queue/stats', async (req, res) => {
 app.post('/api/redis-job', async (req, res) => {
   try {
     const { creator_id, content_id, job_type, params, submission_id } = req.body;
-    
+
     const redisJob = await jobQueue.add('process', {
       creator_id: creator_id || 1,
       content_id: content_id || `redis-${Date.now()}`,
@@ -314,16 +270,16 @@ app.post('/api/redis-job', async (req, res) => {
       created_at: new Date().toISOString()
     }, {
       priority: req.body.priority || 1,
-      attempts: 5  // Match the default
+      attempts: 5
     });
-    
+
     const pgResult = await pgClient.query(
       `INSERT INTO job_queue (creator_id, content_id, job_type, status, params, created_at, redis_job_id, attempts)
        VALUES ($1, $2, $3, 'pending', $4, NOW(), $5, 0)
        RETURNING *`,
       [creator_id || 1, content_id || `redis-${Date.now()}`, job_type || 'video', params || {}, redisJob.id]
     );
-    
+
     res.json({ success: true, redis_job_id: redisJob.id, pg_job: pgResult.rows[0], message: 'Job added to Redis queue' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -333,7 +289,7 @@ app.post('/api/redis-job', async (req, res) => {
 app.post('/test-job', async (req, res) => {
   try {
     const { creator_id = 1, content_id = `test-${Date.now()}`, job_type = 'video' } = req.body;
-    
+
     const redisJob = await jobQueue.add('process', {
       creator_id,
       content_id,
@@ -341,14 +297,14 @@ app.post('/test-job', async (req, res) => {
       params: { test: true },
       created_at: new Date().toISOString()
     }, { attempts: 5 });
-    
+
     const result = await pgClient.query(
       `INSERT INTO job_queue (creator_id, content_id, job_type, status, params, created_at, redis_job_id, attempts)
        VALUES ($1, $2, $3, 'pending', $4, NOW(), $5, 0)
        RETURNING *`,
       [creator_id, content_id, job_type, { test: true }, redisJob.id]
     );
-    
+
     res.json({ message: 'Test job created', job: result.rows[0], redis_job_id: redisJob.id });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -384,7 +340,7 @@ app.listen(PORT, async () => {
   console.log(`   🔄 Auto-reconnect enabled`);
   console.log(`   🔄 Redis queue with 5 concurrent workers`);
   console.log(`   🔄 Exponential backoff (1s,2s,4s,8s,16s)`);
-  
+
   await initDatabase();
 });
 
