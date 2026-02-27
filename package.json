@@ -1,17 +1,19 @@
 {
-  "name": "seekreap-tier5-worker-pool",
-  "version": "2.0.0",
-  "description": "SeekReap Tier-5 Worker Pool",
+  "name": "seekreap-tier-5-worker-pool",
+  "version": "1.0.0",
+  "description": "Tier-5 Worker Pool with PostgreSQL Queue",
   "main": "start.js",
   "scripts": {
     "start": "node start.js",
-    "worker": "node worker_pool.js"
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
-{
+  "keywords": ["queue", "worker", "postgresql", "pg-boss"],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
-    "pg": "^8.11.0",
-    "pg-boss": "^9.0.0",
+    "axios": "^1.4.0",
     "express": "^4.18.0",
-    "axios": "^1.4.0"
+    "pg": "^8.11.0",
+    "pg-boss": "^9.0.0"
   }
 }
