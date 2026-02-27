@@ -2,7 +2,57 @@ const { Client } = require('pg');
 const express = require('express');
 const axios = require('axios');
 const { Worker, Queue, QueueEvents } = require('bullmq');
-const Redis = require('ioredis');
+
+// Get Redis URL from environment
+const redisUrl = process.env.REDIS_URL;
+
+if (!redisUrl) {
+  console.error('❌ FATAL: REDIS_URL environment variable not set!');
+  console.error('   Please set REDIS_URL in your Render environment variables');
+  process.exit(1);
+}
+
+// Log Redis connection (hide password)
+console.log(`[35m🔌 Connecting to Redis at: ${redisUrl.split('@')[1] || redisUrl.replace(/redis://[^@]+@/, 'redis://****@')}[0m`);
+
+const redisConnection = new Redis(redisUrl, {
+  tls: {
+    rejectUnauthorized: false  // Required for Render Redis
+  },
+  maxRetriesPerRequest: null,
+  enableReadyCheck: false,
+  retryStrategy: (times) => {
+    // Exponential backoff
+    const delay = Math.min(times * 100, 3000);
+    console.log(`[33m🔄 Redis reconnecting in ${delay}ms (attempt ${times})[0m`);
+    return delay;
+  }
+});
+
+redisConnection.on('connect', () => {
+  console.log('[32m✅ Redis connected successfully![0m');
+  console.log(`[32m   Connected to: ${redisUrl.split('@')[1] || 'Redis'}[0m`);
+});
+
+redisConnection.on('ready', () => {
+  console.log('[32m✅ Redis client ready[0m');
+});
+
+redisConnection.on('error', (err) => {
+  console.error('[31m❌ Redis error:[0m', err.message);
+  if (err.code === 'ECONNREFUSED') {
+    console.error('   Connection refused - check REDIS_URL and network settings');
+    console.error('   Make sure Redis is running and accessible');
+  }
+});
+
+redisConnection.on('reconnecting', () => {
+  console.log('[33m🔄 Redis reconnecting...[0m');
+});
+
+redisConnection.on('end', () => {
+  console.log('[33m⚠️ Redis connection ended[0m');
+});
 
 // =====================================================
 // Configuration
@@ -24,7 +74,6 @@ const REDIS_CONFIG = {
 };
 
 console.log('🔄 Connecting to Redis...');
-const redisConnection = new Redis(REDIS_CONFIG);
 
 redisConnection.on('connect', () => console.log('✅ Redis connected'));
 redisConnection.on('error', (err) => console.error('❌ Redis error:', err.message));
@@ -193,7 +242,7 @@ app.get('/health', (req, res) => {
     status: 'healthy',
     tier: 5,
     tier4_url: TIER4_URL,
-    redis_connected: redisConnection.status === 'ready',
+    redis_connected: redisConnection.status === 'ready' || redisConnection.status === 'connect',
     db_connected: true,
     timestamp: new Date().toISOString()
   });
