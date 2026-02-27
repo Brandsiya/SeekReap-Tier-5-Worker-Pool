@@ -64,17 +64,56 @@ if (!DATABASE_URL) {
 }
 
 // Redis connection
-const REDIS_CONFIG = {
-  host: process.env.REDIS_HOST || 'localhost',
-  port: parseInt(process.env.REDIS_PORT || '6379'),
-  password: process.env.REDIS_PASSWORD,
+// Get Redis URL from environment
+const redisUrl = process.env.REDIS_URL;
+
+if (!redisUrl) {
+  console.error('❌ FATAL: REDIS_URL environment variable not set!');
+  console.error('   Please set REDIS_URL in your Render environment variables');
+  process.exit(1);
+}
+
+// Log Redis connection (hide password)
+console.log(`🔌 Connecting to Redis at: ${redisUrl.split('@')[1] || redisUrl.replace(/redis:\/\/[^@]+@/, 'redis://****@')}`);
+
+const redisConnection = new Redis(redisUrl, {
+  tls: {
+    rejectUnauthorized: false  // Required for Render Redis
+  },
   maxRetriesPerRequest: null,
   enableReadyCheck: false,
-  retryStrategy: (times) => Math.min(times * 50, 2000)
-};
+  retryStrategy: (times) => {
+    // Exponential backoff
+    const delay = Math.min(times * 100, 3000);
+    console.log(`🔄 Redis reconnecting in ${delay}ms (attempt ${times})`);
+    return delay;
+  }
+});
 
-console.log('🔄 Connecting to Redis...');
+redisConnection.on('connect', () => {
+  console.log('✅ Redis connected successfully!');
+  console.log(`   Connected to: ${redisUrl.split('@')[1] || 'Redis'}`);
+});
 
+redisConnection.on('ready', () => {
+  console.log('✅ Redis client ready');
+});
+
+redisConnection.on('error', (err) => {
+  console.error('❌ Redis error:', err.message);
+  if (err.code === 'ECONNREFUSED') {
+    console.error('   Connection refused - check REDIS_URL and network settings');
+    console.error('   Make sure Redis is running and accessible');
+  }
+});
+
+redisConnection.on('reconnecting', () => {
+  console.log('🔄 Redis reconnecting...');
+});
+
+redisConnection.on('end', () => {
+  console.log('⚠️ Redis connection ended');
+});
 redisConnection.on('connect', () => console.log('✅ Redis connected'));
 redisConnection.on('error', (err) => console.error('❌ Redis error:', err.message));
 
