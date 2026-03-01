@@ -1,14 +1,13 @@
 # 🐝 SeekReap Tier-5 Worker Pool
-**Core Role:** The execution layer. This pool handles high-CPU/Memory tasks (Video/Data) as directed by the Tier-4 Orchestrator.
+**Core Role:** The execution layer. Handles high-CPU tasks directed by Tier-4.
 
 ## 🛠 Setup & Runtime
-1. **Install:** `npm install`
-2. **Execution:** `node start.js`
-3. **Entry Point:** start.js (Initializes worker_pool.js)
+1. **Primary Entry Point:** `node start.js` (Runs on Port 3001)
+2. **Web Entry Point:** `node server.js` (Runs on Port 3000)
 
-## 📡 Integration
-- **Inbound:** Receives delegated tasks from Tier-4 Orchestrator.
-- **Outbound:** Returns processed results to the Tier-3 Core Engine.
+## 📡 Ports & Services
+- **3001:** Core Job Worker & Queue Stats.
+- **3000:** General API Interface.
 
-## 🧪 Health
-Verify worker availability: `curl http://localhost:PORT/health`
+## 🧪 Health Check
+- Worker Health: `curl http://localhost:3001/health`
