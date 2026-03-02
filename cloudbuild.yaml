@@ -1,0 +1,24 @@
+steps:
+  # 1. Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/tier5-worker', '.']
+
+  # 2. Push the image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/tier5-worker']
+
+  # 3. Update the Cloud Run Job with the new image
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'seekreap-worker-job'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/tier5-worker'
+      - '--region'
+      - 'us-central1'
+
+images:
+  - 'gcr.io/$PROJECT_ID/tier5-worker'
