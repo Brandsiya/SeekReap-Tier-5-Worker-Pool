@@ -2,3 +2,18 @@ node_modules/
 *.log
 __pycache__/
 .env
+google-cloud-sdk-*.tar.gz
+google-cloud-sdk/
+*.backup
+watchdog.sh
+# Google Cloud SDK
+google-cloud-sdk/
+google-cloud-sdk-*.tar.gz
+
+# Backup files
+*.backup
+watchdog.sh
+
+# Large local files
+*.tgz
+*.tar.gz
