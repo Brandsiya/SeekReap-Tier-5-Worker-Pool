@@ -1,26 +1,38 @@
 steps:
-  # 1. Build the Docker image
+  # Build the container image
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/tier5-worker', '.']
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/seekreap-worker', '.']
 
-  # 2. Push image to Google's Registry
+  # Push the container image to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/$PROJECT_ID/tier5-worker']
+    args: ['push', 'gcr.io/$PROJECT_ID/seekreap-worker']
 
-  # 3. Deploy (Create or Update) the Cloud Run Job
+  # Deploy as a Cloud Run Job with Neon environment variables
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       - 'run'
       - 'jobs'
       - 'deploy'
-      - 'seekreap-worker-job'
+      - 'seekreap-worker'
       - '--image'
-      - 'gcr.io/$PROJECT_ID/tier5-worker'
+      - 'gcr.io/$PROJECT_ID/seekreap-worker'
       - '--region'
       - 'us-central1'
+      - '--tasks'
+      - '1'
+      - '--max-retries'
+      - '3'
+      - '--memory'
+      - '512Mi'
+      - '--cpu'
+      - '1000m'
       - '--set-env-vars'
-      - 'DATABASE_URL=postgresql://neondb_owner:npg_yX7aHMwIqQC4@ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech:5432/seekreap_neon_db?sslmode=require'
+      - 'DB_HOST=ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech,DB_PORT=5432,DB_NAME=seekreap_neon_db,DB_USER=neondb_owner,DB_PASSWORD=npg_yX7aHMwIqQC4,DB_SSLMODE=require'
 
+# Keep the log bucket fix
 options:
-  logging: CLOUD_LOGGING_ONLY
+  defaultLogsBucketBehavior: REGIONAL_USER_OWNED_BUCKET
+
+images:
+  - 'gcr.io/$PROJECT_ID/seekreap-worker'
