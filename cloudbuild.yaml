@@ -1,7 +1,25 @@
-# Tier-5 Worker Pool - local worker scripts
-# seekreap-worker Cloud Run service is deployed via SeekReap-Tier-6-Backend trigger
 steps:
-  - name: 'alpine'
-    args: ['echo', 'Tier-5 Worker Pool - no Cloud Run deployment needed']
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/seekreap-worker', '.']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/seekreap-worker']
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'seekreap-worker'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/seekreap-worker'
+      - '--region'
+      - 'us-central1'
+      - '--set-env-vars'
+      - 'DATABASE_URL=postgres://neondb_owner:npg_yX7aHMwIqQC4@ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech/seekreap_neon_db?sslmode=require'
+
 options:
   logging: CLOUD_LOGGING_ONLY
+
+images:
+  - 'gcr.io/$PROJECT_ID/seekreap-worker'
