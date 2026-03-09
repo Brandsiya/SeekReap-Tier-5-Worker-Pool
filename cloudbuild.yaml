@@ -15,8 +15,9 @@ steps:
       - 'gcr.io/$PROJECT_ID/seekreap-worker'
       - '--region'
       - 'us-central1'
+      - '--allow-unauthenticated'
       - '--set-env-vars'
-      - 'DATABASE_URL=postgres://neondb_owner:npg_yX7aHMwIqQC4@ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech/seekreap_neon_db?sslmode=require'
+      - 'DATABASE_URL=postgresql://neondb_owner:npg_yX7aHMwIqQC4@ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech:5432/seekreap_neon_db?sslmode=require,TIER4_URL=https://seekreap-tier4-tif2gmgi4q-uc.a.run.app'
 
 options:
   logging: CLOUD_LOGGING_ONLY
