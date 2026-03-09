@@ -24,7 +24,7 @@ def _update_submission_status(submission_id, status):
     try:
         conn = _get_db()
         cur = conn.cursor()
-        cur.execute("UPDATE submissions SET status = %s, updated_at = NOW() WHERE id = %s", (status, submission_id))
+        cur.execute("UPDATE submissions SET status = %s, completed_at = NOW() WHERE id = %s", (status, submission_id))
         conn.commit(); cur.close(); conn.close()
     except Exception as e:
         logger.error("DB update failed for %s: %s", submission_id, e)
