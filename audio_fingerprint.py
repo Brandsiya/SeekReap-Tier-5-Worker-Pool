@@ -1,7 +1,7 @@
 """
 SeekReap Tier-5 — Track B audio fingerprinting.
-Downloads YouTube audio via yt-dlp, computes chromaprint via fpcalc,
-compares against fingerprints table, updates the row.
+Uses yt-dlp --get-url to fetch the direct stream URL, then ffmpeg -t 120
+to download only the first 2 minutes. fpcalc only needs ~60s for a reliable fingerprint.
 """
 import os, subprocess, tempfile, logging, json
 
@@ -15,28 +15,45 @@ DB_URL = os.environ.get(
 MATCH_THRESHOLD = 0.85
 
 
-def _download_audio(content_url: str, out_dir: str) -> str:
-    """Download first 120s of audio-only stream. Returns path to audio file."""
-    out_template = os.path.join(out_dir, "audio.%(ext)s")
-    cmd = [
-        "yt-dlp",
-        "--no-playlist",
-        "--format", "worstaudio/bestaudio",   # smallest file = fastest download
-        "--output", out_template,
-        "--quiet",
-        "--no-warnings",
-        "--socket-timeout", "20",             # fail fast on stalled connections
-        "--extractor-retries", "1",           # don't retry extractor on failure
-        "--retries", "2",                     # 2 network retries max
-        "--download-sections", "*0-120",      # only first 120s — enough for fpcalc
-        "--no-part",                          # write directly, no .part temp files
-        content_url,
-    ]
-    subprocess.run(cmd, check=True, timeout=90)   # bumped to 90s overall
-    for f in os.listdir(out_dir):
-        if f.startswith("audio."):
-            return os.path.join(out_dir, f)
-    raise FileNotFoundError("yt-dlp did not produce an audio file")
+def _get_audio_stream_url(content_url: str) -> str:
+    """Use yt-dlp --get-url to extract the direct audio stream URL (no download)."""
+    result = subprocess.run(
+        [
+            "yt-dlp",
+            "--no-playlist",
+            "--format", "worstaudio/bestaudio",
+            "--get-url",
+            "--no-warnings",
+            "--socket-timeout", "15",
+            "--extractor-retries", "1",
+            content_url,
+        ],
+        capture_output=True, text=True, timeout=30
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"yt-dlp --get-url failed: {result.stderr.strip()[:200]}")
+    stream_url = result.stdout.strip().splitlines()[0]
+    if not stream_url:
+        raise RuntimeError("yt-dlp returned empty stream URL")
+    logger.info("Got stream URL (len=%d)", len(stream_url))
+    return stream_url
+
+
+def _download_audio_ffmpeg(stream_url: str, out_path: str) -> None:
+    """Use ffmpeg to download exactly 120s of audio from the direct stream URL."""
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",                    # overwrite output
+            "-t", "120",             # stop after 120 seconds — hard cutoff
+            "-i", stream_url,        # direct stream URL from yt-dlp
+            "-vn",                   # no video
+            "-acodec", "copy",       # copy audio stream (no re-encode = fast)
+            "-loglevel", "error",
+            out_path,
+        ],
+        check=True, timeout=60       # ffmpeg with -t 120 should finish in well under 60s
+    )
 
 
 def _compute_chromaprint(audio_path: str):
@@ -50,10 +67,6 @@ def _compute_chromaprint(audio_path: str):
 
 
 def _bic_similarity(fp1: str, fp2: str) -> float:
-    """
-    Rough similarity between two chromaprint strings.
-    Compares character overlap as a proxy (good enough for duplicate detection).
-    """
     if not fp1 or not fp2:
         return 0.0
     min_len = min(len(fp1), len(fp2))
@@ -64,12 +77,6 @@ def _bic_similarity(fp1: str, fp2: str) -> float:
 
 
 def run_audio_fingerprint(submission_id: str, creator_id: str, content_url: str) -> dict:
-    """
-    Main entry point called from Tier-5 worker.
-    Downloads audio, computes chromaprint, compares against DB,
-    updates fingerprints row for this submission.
-    Returns result dict.
-    """
     result = {
         "audio_fingerprint":      None,
         "audio_duration":         None,
@@ -79,26 +86,36 @@ def run_audio_fingerprint(submission_id: str, creator_id: str, content_url: str)
         "error":                  None,
     }
 
-    # 1. Download audio to temp dir
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            audio_path = _download_audio(content_url, tmp)
+            out_path = os.path.join(tmp, "audio.m4a")
 
-            # 2. Compute chromaprint
-            fp_str, duration = _compute_chromaprint(audio_path)
+            # Step 1: get direct stream URL (fast — no download, just metadata)
+            logger.info("Fetching stream URL for %s", submission_id)
+            stream_url = _get_audio_stream_url(content_url)
+
+            # Step 2: download first 120s via ffmpeg
+            logger.info("Downloading 120s of audio for %s", submission_id)
+            _download_audio_ffmpeg(stream_url, out_path)
+
+            # Step 3: compute chromaprint
+            logger.info("Computing chromaprint for %s", submission_id)
+            fp_str, duration = _compute_chromaprint(out_path)
             result["audio_fingerprint"] = fp_str
             result["audio_duration"]    = duration
+            logger.info("Chromaprint done for %s: duration=%.1fs fp_len=%d",
+                        submission_id, duration, len(fp_str))
 
-    except subprocess.TimeoutExpired:
-        result["error"] = "Audio download/fingerprint timed out"
-        logger.warning("Audio timeout for %s", submission_id)
+    except subprocess.TimeoutExpired as e:
+        result["error"] = f"Audio step timed out: {e}"
+        logger.warning("Audio timeout for %s: %s", submission_id, e)
         return result
     except Exception as e:
         result["error"] = f"Audio processing failed: {e}"
         logger.warning("Audio processing error for %s: %s", submission_id, e)
         return result
 
-    # 3. Compare + store in DB
+    # Step 4: compare + store in DB
     try:
         import psycopg2
         conn = psycopg2.connect(DB_URL)
@@ -119,13 +136,11 @@ def run_audio_fingerprint(submission_id: str, creator_id: str, content_url: str)
             )
 
         rows = cur.fetchall()
-        best_score = 0.0
-        best_row   = None
+        best_score, best_row = 0.0, None
         for row in rows:
             score = _bic_similarity(fp_str, row[2])
             if score > best_score:
-                best_score = score
-                best_row   = row
+                best_score, best_row = score, row
 
         if best_row and best_score >= MATCH_THRESHOLD:
             result["audio_similarity_score"] = best_score
@@ -155,7 +170,7 @@ def run_audio_fingerprint(submission_id: str, creator_id: str, content_url: str)
         cur.close()
         conn.close()
         result["audio_stored"] = True
-        logger.info("Audio fingerprint stored for %s (duration=%.1fs)", submission_id, duration)
+        logger.info("Audio fingerprint stored ✅ for %s", submission_id)
 
     except Exception as e:
         logger.error("DB audio fingerprint failed for %s: %s", submission_id, e)
