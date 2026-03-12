@@ -24,7 +24,10 @@ def _update_submission_status(submission_id, status):
     try:
         conn = _get_db()
         cur = conn.cursor()
-        cur.execute("UPDATE submissions SET status = %s, completed_at = NOW() WHERE id = %s", (status, submission_id))
+        cur.execute(
+            "UPDATE submissions SET status = %s, completed_at = NOW() WHERE id = %s",
+            (status, submission_id)
+        )
         conn.commit(); cur.close(); conn.close()
     except Exception as e:
         logger.error("DB update failed for %s: %s", submission_id, e)
@@ -33,7 +36,11 @@ def _notify_tier4(submission_id, status):
     if not TIER4_URL:
         return
     try:
-        requests.post(f"{TIER4_URL}/api/job-update", json={"submission_id": submission_id, "status": status}, timeout=10)
+        requests.post(
+            f"{TIER4_URL}/api/job-update",
+            json={"submission_id": submission_id, "status": status},
+            timeout=10
+        )
     except Exception as e:
         logger.error("Could not notify Tier-4: %s", e)
 
@@ -41,7 +48,27 @@ def process_submission(submission_id, payload):
     def _run():
         try:
             _update_submission_status(submission_id, "PROCESSING")
-            time.sleep(2)
+
+            # --- Phase 2 Track B: Audio fingerprinting ---
+            content_url = payload.get("content_url", "")
+            creator_id  = payload.get("creator_id",  "")
+            if content_url:
+                try:
+                    from audio_fingerprint import run_audio_fingerprint
+                    af_result = run_audio_fingerprint(submission_id, creator_id, content_url)
+                    if af_result.get("error"):
+                        logger.warning("Audio fingerprint error for %s: %s", submission_id, af_result["error"])
+                    else:
+                        logger.info(
+                            "Audio fingerprint stored for %s — duration=%.1fs similarity=%.2f",
+                            submission_id,
+                            af_result.get("audio_duration", 0),
+                            af_result.get("audio_similarity_score", 0),
+                        )
+                except Exception as af_err:
+                    logger.error("Audio fingerprint exception for %s: %s", submission_id, af_err)
+            # ---------------------------------------------
+
             _update_submission_status(submission_id, "COMPLETED")
             _notify_tier4(submission_id, "COMPLETED")
         except Exception as e:
@@ -51,25 +78,41 @@ def process_submission(submission_id, payload):
     threading.Thread(target=_run, daemon=True).start()
 
 def process_tasks():
+    """Poll submissions table for QUEUED jobs and process them."""
     logger.info("Tier-5: polling loop starting...")
     while True:
         if not DB_URL:
-            time.sleep(30); continue
+            time.sleep(30)
+            continue
         try:
             conn = _get_db()
             cur = conn.cursor(cursor_factory=RealDictCursor)
             cur.execute("""
-                UPDATE video_patterns SET status = 'processing', updated_at = CURRENT_TIMESTAMP
-                WHERE id = (SELECT id FROM video_patterns WHERE status = 'pending' ORDER BY created_at ASC FOR UPDATE SKIP LOCKED LIMIT 1)
-                RETURNING id, video_id
+                UPDATE submissions
+                   SET status = 'PROCESSING'
+                 WHERE id = (
+                     SELECT id FROM submissions
+                      WHERE status = 'QUEUED'
+                      ORDER BY submitted_at ASC
+                      FOR UPDATE SKIP LOCKED
+                      LIMIT 1
+                 )
+                 RETURNING id, content_url, creator_id
             """)
             task = cur.fetchone()
+            conn.commit()
+            cur.close()
+            conn.close()
+
             if task:
-                time.sleep(10)
-                cur.execute("UPDATE video_patterns SET status = 'completed' WHERE id = %s", (task['id'],))
-            conn.commit(); cur.close(); conn.close()
+                logger.info("Tier-5: picked up submission %s", task["id"])
+                process_submission(str(task["id"]), {
+                    "content_url": task.get("content_url", ""),
+                    "creator_id":  str(task.get("creator_id", "")),
+                })
         except Exception as e:
             logger.error("Polling error: %s", e)
+
         time.sleep(15)
 
 class WorkerHandler(BaseHTTPRequestHandler):
