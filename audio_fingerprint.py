@@ -71,7 +71,7 @@ def _download_audio_ffmpeg(stream_url: str, out_path: str) -> None:
             "-loglevel", "error",
             out_path,
         ],
-        check=True, timeout=60
+        check=True, timeout=180
     )
 
 
