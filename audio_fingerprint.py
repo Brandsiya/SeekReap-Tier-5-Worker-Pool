@@ -1,22 +1,22 @@
 """
 SeekReap Tier-5 — Track B audio fingerprinting.
-Gets direct stream URL via Tier-3 proxy (Tier-3 can reach YouTube, Tier-5 cannot).
-Then uses ffmpeg -t 120 to download only the first 2 minutes for fpcalc.
+Delegates the full pipeline to Tier-3 (which has YouTube/googlevideo egress).
+Tier-5 only handles DB storage.
 """
-import os, subprocess, tempfile, logging, json, urllib.request, urllib.error
+import os, json, logging, urllib.request
+import psycopg2, uuid as _uv
 
 logger = logging.getLogger(__name__)
 
-DB_URL     = os.environ.get("DATABASE_URL",
+DB_URL    = os.environ.get("DATABASE_URL",
     "postgresql://neondb_owner:npg_yX7aHMwIqQC4@ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech:5432/seekreap_neon_db?sslmode=require")
-TIER3_URL  = os.environ.get("TIER3_URL",
+TIER3_URL = os.environ.get("TIER3_URL",
     "https://seekreap-tier3-tif2gmgi4q-uc.a.run.app")
 
 MATCH_THRESHOLD = 0.85
 
 
 def _get_identity_token() -> str:
-    """Fetch GCP identity token for calling private Tier-3 service."""
     meta_url = (
         "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts"
         "/default/identity?audience=" + TIER3_URL
@@ -26,62 +26,26 @@ def _get_identity_token() -> str:
         return resp.read().decode()
 
 
-def _get_audio_stream_url(content_url: str) -> str:
-    """Call Tier-3's /internal/stream-url to get a direct audio stream URL."""
-    endpoint = f"{TIER3_URL}/internal/stream-url"
+def _call_tier3_fingerprint(content_url: str) -> dict:
+    endpoint = f"{TIER3_URL}/internal/audio-fingerprint"
     payload  = json.dumps({"content_url": content_url}).encode()
-
     try:
         token = _get_identity_token()
         auth_header = f"Bearer {token}"
     except Exception as e:
-        logger.warning("Could not get identity token: %s — trying unauthenticated", e)
+        logger.warning("No identity token: %s — trying unauthenticated", e)
         auth_header = None
-
     req = urllib.request.Request(
-        endpoint,
-        data=payload,
+        endpoint, data=payload,
         headers={
             "Content-Type": "application/json",
             **({"Authorization": auth_header} if auth_header else {}),
         },
         method="POST"
     )
-    with urllib.request.urlopen(req, timeout=35) as resp:
-        data = json.loads(resp.read().decode())
-
-    if "error" in data:
-        raise RuntimeError(f"Tier-3 stream-url error: {data['error']}")
-    stream_url = data.get("stream_url", "")
-    if not stream_url:
-        raise RuntimeError("Tier-3 returned empty stream_url")
-    logger.info("Got stream URL from Tier-3 (len=%d)", len(stream_url))
-    return stream_url
-
-
-def _download_audio_ffmpeg(stream_url: str, out_path: str) -> None:
-    """Use ffmpeg to download exactly 120s of audio from the direct stream URL."""
-    subprocess.run(
-        [
-            "ffmpeg", "-y",
-            "-t", "120",
-            "-i", stream_url,
-            "-vn",
-            "-acodec", "copy",
-            "-loglevel", "error",
-            out_path,
-        ],
-        check=True, timeout=180
-    )
-
-
-def _compute_chromaprint(audio_path: str):
-    result = subprocess.run(
-        ["fpcalc", "-json", audio_path],
-        capture_output=True, text=True, timeout=30, check=True
-    )
-    data = json.loads(result.stdout)
-    return data["fingerprint"], float(data["duration"])
+    # Tier-3 pipeline: 25s yt-dlp + 180s ffmpeg + 30s fpcalc = up to ~235s
+    with urllib.request.urlopen(req, timeout=260) as resp:
+        return json.loads(resp.read().decode())
 
 
 def _bic_similarity(fp1: str, fp2: str) -> float:
@@ -104,34 +68,26 @@ def run_audio_fingerprint(submission_id: str, creator_id: str, content_url: str)
         "error":                  None,
     }
 
+    logger.info("Calling Tier-3 audio fingerprint pipeline for %s", submission_id)
     try:
-        with tempfile.TemporaryDirectory() as tmp:
-            out_path = os.path.join(tmp, "audio.m4a")
-
-            logger.info("Requesting stream URL from Tier-3 for %s", submission_id)
-            stream_url = _get_audio_stream_url(content_url)
-
-            logger.info("Downloading 120s via ffmpeg for %s", submission_id)
-            _download_audio_ffmpeg(stream_url, out_path)
-
-            logger.info("Computing chromaprint for %s", submission_id)
-            fp_str, duration = _compute_chromaprint(out_path)
-            result["audio_fingerprint"] = fp_str
-            result["audio_duration"]    = duration
-            logger.info("Chromaprint done for %s: duration=%.1fs", submission_id, duration)
-
-    except subprocess.TimeoutExpired as e:
-        result["error"] = f"Audio step timed out: {e}"
-        logger.warning("Audio timeout for %s: %s", submission_id, e)
-        return result
+        data = _call_tier3_fingerprint(content_url)
     except Exception as e:
-        result["error"] = f"Audio processing failed: {e}"
-        logger.warning("Audio processing error for %s: %s", submission_id, e)
+        result["error"] = f"Tier-3 call failed: {e}"
+        logger.warning("Tier-3 audio call failed for %s: %s", submission_id, e)
         return result
 
-    # Store in DB
+    if "error" in data:
+        result["error"] = f"Tier-3 pipeline error: {data['error']}"
+        logger.warning("Tier-3 returned error for %s: %s", submission_id, data["error"])
+        return result
+
+    fp_str   = data.get("fingerprint", "")
+    duration = float(data.get("duration", 0))
+    result["audio_fingerprint"] = fp_str
+    result["audio_duration"]    = duration
+    logger.info("Got fingerprint from Tier-3 for %s: duration=%.1fs", submission_id, duration)
+
     try:
-        import psycopg2, uuid as _uv
         conn = psycopg2.connect(DB_URL)
         cur  = conn.cursor()
 
