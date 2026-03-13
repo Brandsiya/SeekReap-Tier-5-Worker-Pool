@@ -1,41 +1,61 @@
 """
 SeekReap Tier-5 — Track B audio fingerprinting.
-Uses yt-dlp --get-url to fetch the direct stream URL, then ffmpeg -t 120
-to download only the first 2 minutes. fpcalc only needs ~60s for a reliable fingerprint.
+Gets direct stream URL via Tier-3 proxy (Tier-3 can reach YouTube, Tier-5 cannot).
+Then uses ffmpeg -t 120 to download only the first 2 minutes for fpcalc.
 """
-import os, subprocess, tempfile, logging, json
+import os, subprocess, tempfile, logging, json, urllib.request, urllib.error
 
 logger = logging.getLogger(__name__)
 
-DB_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://neondb_owner:npg_yX7aHMwIqQC4@ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech:5432/seekreap_neon_db?sslmode=require"
-)
+DB_URL     = os.environ.get("DATABASE_URL",
+    "postgresql://neondb_owner:npg_yX7aHMwIqQC4@ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech:5432/seekreap_neon_db?sslmode=require")
+TIER3_URL  = os.environ.get("TIER3_URL",
+    "https://seekreap-tier3-tif2gmgi4q-uc.a.run.app")
 
 MATCH_THRESHOLD = 0.85
 
 
-def _get_audio_stream_url(content_url: str) -> str:
-    """Use yt-dlp --get-url to extract the direct audio stream URL (no download)."""
-    result = subprocess.run(
-        [
-            "yt-dlp",
-            "--no-playlist",
-            "--format", "worstaudio/bestaudio",
-            "--get-url",
-            "--no-warnings",
-            "--socket-timeout", "15",
-            "--extractor-retries", "1",
-            content_url,
-        ],
-        capture_output=True, text=True, timeout=30
+def _get_identity_token() -> str:
+    """Fetch GCP identity token for calling private Tier-3 service."""
+    meta_url = (
+        "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts"
+        "/default/identity?audience=" + TIER3_URL
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"yt-dlp --get-url failed: {result.stderr.strip()[:200]}")
-    stream_url = result.stdout.strip().splitlines()[0]
+    req = urllib.request.Request(meta_url, headers={"Metadata-Flavor": "Google"})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return resp.read().decode()
+
+
+def _get_audio_stream_url(content_url: str) -> str:
+    """Call Tier-3's /internal/stream-url to get a direct audio stream URL."""
+    endpoint = f"{TIER3_URL}/internal/stream-url"
+    payload  = json.dumps({"content_url": content_url}).encode()
+
+    try:
+        token = _get_identity_token()
+        auth_header = f"Bearer {token}"
+    except Exception as e:
+        logger.warning("Could not get identity token: %s — trying unauthenticated", e)
+        auth_header = None
+
+    req = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            **({"Authorization": auth_header} if auth_header else {}),
+        },
+        method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=35) as resp:
+        data = json.loads(resp.read().decode())
+
+    if "error" in data:
+        raise RuntimeError(f"Tier-3 stream-url error: {data['error']}")
+    stream_url = data.get("stream_url", "")
     if not stream_url:
-        raise RuntimeError("yt-dlp returned empty stream URL")
-    logger.info("Got stream URL (len=%d)", len(stream_url))
+        raise RuntimeError("Tier-3 returned empty stream_url")
+    logger.info("Got stream URL from Tier-3 (len=%d)", len(stream_url))
     return stream_url
 
 
@@ -43,21 +63,19 @@ def _download_audio_ffmpeg(stream_url: str, out_path: str) -> None:
     """Use ffmpeg to download exactly 120s of audio from the direct stream URL."""
     subprocess.run(
         [
-            "ffmpeg",
-            "-y",                    # overwrite output
-            "-t", "120",             # stop after 120 seconds — hard cutoff
-            "-i", stream_url,        # direct stream URL from yt-dlp
-            "-vn",                   # no video
-            "-acodec", "copy",       # copy audio stream (no re-encode = fast)
+            "ffmpeg", "-y",
+            "-t", "120",
+            "-i", stream_url,
+            "-vn",
+            "-acodec", "copy",
             "-loglevel", "error",
             out_path,
         ],
-        check=True, timeout=60       # ffmpeg with -t 120 should finish in well under 60s
+        check=True, timeout=60
     )
 
 
 def _compute_chromaprint(audio_path: str):
-    """Run fpcalc and return (fingerprint_str, duration_float)."""
     result = subprocess.run(
         ["fpcalc", "-json", audio_path],
         capture_output=True, text=True, timeout=30, check=True
@@ -90,21 +108,17 @@ def run_audio_fingerprint(submission_id: str, creator_id: str, content_url: str)
         with tempfile.TemporaryDirectory() as tmp:
             out_path = os.path.join(tmp, "audio.m4a")
 
-            # Step 1: get direct stream URL (fast — no download, just metadata)
-            logger.info("Fetching stream URL for %s", submission_id)
+            logger.info("Requesting stream URL from Tier-3 for %s", submission_id)
             stream_url = _get_audio_stream_url(content_url)
 
-            # Step 2: download first 120s via ffmpeg
-            logger.info("Downloading 120s of audio for %s", submission_id)
+            logger.info("Downloading 120s via ffmpeg for %s", submission_id)
             _download_audio_ffmpeg(stream_url, out_path)
 
-            # Step 3: compute chromaprint
             logger.info("Computing chromaprint for %s", submission_id)
             fp_str, duration = _compute_chromaprint(out_path)
             result["audio_fingerprint"] = fp_str
             result["audio_duration"]    = duration
-            logger.info("Chromaprint done for %s: duration=%.1fs fp_len=%d",
-                        submission_id, duration, len(fp_str))
+            logger.info("Chromaprint done for %s: duration=%.1fs", submission_id, duration)
 
     except subprocess.TimeoutExpired as e:
         result["error"] = f"Audio step timed out: {e}"
@@ -115,13 +129,12 @@ def run_audio_fingerprint(submission_id: str, creator_id: str, content_url: str)
         logger.warning("Audio processing error for %s: %s", submission_id, e)
         return result
 
-    # Step 4: compare + store in DB
+    # Store in DB
     try:
-        import psycopg2
+        import psycopg2, uuid as _uv
         conn = psycopg2.connect(DB_URL)
         cur  = conn.cursor()
 
-        import uuid as _uv
         try:
             _uv.UUID(submission_id)
             cur.execute(
@@ -147,28 +160,18 @@ def run_audio_fingerprint(submission_id: str, creator_id: str, content_url: str)
             result["closest_audio_match_id"] = str(best_row[0])
 
         cur.execute(
-            """
-            UPDATE fingerprints
-               SET audio_fingerprint = %s,
-                   audio_duration    = %s
-             WHERE submission_id = %s
-            """,
+            "UPDATE fingerprints SET audio_fingerprint=%s, audio_duration=%s WHERE submission_id=%s",
             (fp_str, duration, submission_id)
         )
         if cur.rowcount == 0:
             cur.execute(
-                """
-                INSERT INTO fingerprints
+                """INSERT INTO fingerprints
                     (submission_id, creator_id, content_url, audio_fingerprint, audio_duration, fingerprint_version)
-                VALUES (%s, %s, %s, %s, %s, 'audio-v1')
-                ON CONFLICT DO NOTHING
-                """,
+                   VALUES (%s,%s,%s,%s,%s,'audio-v1') ON CONFLICT DO NOTHING""",
                 (submission_id, creator_id, content_url, fp_str, duration)
             )
 
-        conn.commit()
-        cur.close()
-        conn.close()
+        conn.commit(); cur.close(); conn.close()
         result["audio_stored"] = True
         logger.info("Audio fingerprint stored ✅ for %s", submission_id)
 
