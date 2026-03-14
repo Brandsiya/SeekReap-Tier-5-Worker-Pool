@@ -1,150 +1,34 @@
-import threading
-import os
-import time
-import logging
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import json
-import requests
+import time, httpx, redis, logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-DB_URL    = os.environ.get("DATABASE_URL")
-PORT      = int(os.environ.get("PORT", 8080))
-TIER4_URL = os.environ.get("TIER4_URL")
+r = redis.Redis(host="127.0.0.1", port=6379, db=0, decode_responses=True)
+r.ping()
+logger.info("Connected to Redis successfully")
 
-def _get_db():
-    return psycopg2.connect(DB_URL)
+def call_tier3(submission_id):
+    resp = httpx.post("http://localhost:8000/api/analyze", json={
+        "content_id": submission_id,
+        "content_type": "youtube_video",
+        "content_data": {"audio_similarity":0.8,"visual_similarity":0.6}
+    })
+    return resp.json()
 
-def _update_submission_status(submission_id, status):
-    if not DB_URL:
-        return
-    try:
-        conn = _get_db()
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE submissions SET status = %s, completed_at = NOW() WHERE id = %s",
-            (status, submission_id)
-        )
-        conn.commit(); cur.close(); conn.close()
-    except Exception as e:
-        logger.error("DB update failed for %s: %s", submission_id, e)
-
-def _notify_tier4(submission_id, status):
-    if not TIER4_URL:
-        return
-    try:
-        requests.post(
-            f"{TIER4_URL}/api/job-update",
-            json={"submission_id": submission_id, "status": status},
-            timeout=10
-        )
-    except Exception as e:
-        logger.error("Could not notify Tier-4: %s", e)
-
-def process_submission(submission_id, payload):
-    def _run():
-        try:
-            _update_submission_status(submission_id, "PROCESSING")
-
-            # --- Phase 2 Track B: Audio fingerprinting ---
-            content_url = payload.get("content_url", "")
-            creator_id  = payload.get("creator_id",  "")
-            if content_url:
-                try:
-                    from audio_fingerprint import run_audio_fingerprint
-                    af_result = run_audio_fingerprint(submission_id, creator_id, content_url)
-                    if af_result.get("error"):
-                        logger.warning("Audio fingerprint error for %s: %s", submission_id, af_result["error"])
-                    else:
-                        logger.info(
-                            "Audio fingerprint stored for %s — duration=%.1fs similarity=%.2f",
-                            submission_id,
-                            af_result.get("audio_duration", 0),
-                            af_result.get("audio_similarity_score", 0),
-                        )
-                except Exception as af_err:
-                    logger.error("Audio fingerprint exception for %s: %s", submission_id, af_err)
-            # ---------------------------------------------
-
-            _update_submission_status(submission_id, "COMPLETED")
-            _notify_tier4(submission_id, "COMPLETED")
-        except Exception as e:
-            logger.error("Worker failed for %s: %s", submission_id, e)
-            _update_submission_status(submission_id, "FAILED")
-            _notify_tier4(submission_id, "FAILED")
-    threading.Thread(target=_run, daemon=True).start()
-
-def process_tasks():
-    """Poll submissions table for QUEUED jobs and process them."""
-    logger.info("Tier-5: polling loop starting...")
-    while True:
-        if not DB_URL:
-            time.sleep(30)
-            continue
-        try:
-            conn = _get_db()
-            cur = conn.cursor(cursor_factory=RealDictCursor)
-            cur.execute("""
-                UPDATE submissions
-                   SET status = 'PROCESSING'
-                 WHERE id = (
-                     SELECT id FROM submissions
-                      WHERE status = 'QUEUED'
-                      ORDER BY submitted_at ASC
-                      FOR UPDATE SKIP LOCKED
-                      LIMIT 1
-                 )
-                 RETURNING id, content_url, creator_id
-            """)
-            task = cur.fetchone()
-            conn.commit()
-            cur.close()
-            conn.close()
-
-            if task:
-                logger.info("Tier-5: picked up submission %s", task["id"])
-                process_submission(str(task["id"]), {
-                    "content_url": task.get("content_url", ""),
-                    "creator_id":  str(task.get("creator_id", "")),
-                })
-        except Exception as e:
-            logger.error("Polling error: %s", e)
-
-        time.sleep(15)
-
-class WorkerHandler(BaseHTTPRequestHandler):
-    def log_message(self, format, *args): pass
-    def _send_json(self, code, data):
-        body = json.dumps(data).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-    def do_GET(self):
-        if self.path == "/health":
-            self._send_json(200, {"status": "healthy", "tier": 5})
-        else:
-            self._send_json(404, {"error": "not found"})
-    def do_POST(self):
-        if self.path == "/process":
-            try:
-                length = int(self.headers.get("Content-Length", 0))
-                body = json.loads(self.rfile.read(length))
-                sid = body.get("submission_id")
-                if not sid:
-                    self._send_json(400, {"error": "submission_id required"}); return
-                process_submission(sid, body)
-                self._send_json(202, {"status": "accepted", "submission_id": sid})
-            except Exception as e:
-                self._send_json(500, {"error": str(e)})
-        else:
-            self._send_json(404, {"error": "not found"})
+def update_tier4(submission_id, analysis):
+    resp = httpx.post("http://localhost:8081/api/finalize", json={
+        "submission_id": submission_id,
+        "analysis": analysis
+    })
+    logger.info(f"Updated Tier-4 for {submission_id}: {resp.text}")
 
 if __name__ == "__main__":
-    threading.Thread(target=process_tasks, daemon=True).start()
-    logger.info("Tier-5 HTTP server starting on port %d", PORT)
-    HTTPServer(("", PORT), WorkerHandler).serve_forever()
+    logger.info("Tier-5 worker started...")
+    while True:
+        job_id = r.rpop("jobs")
+        if job_id:
+            logger.info(f"Processing job {job_id}")
+            analysis = call_tier3(job_id)
+            update_tier4(job_id, analysis)
+        else:
+            time.sleep(5)
