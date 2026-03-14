@@ -11,9 +11,8 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY *.py .
-COPY *.sh .
+# Copy all Python files
+COPY *.py ./
 
 # Run the worker
 CMD ["python", "worker_pool.py"]
