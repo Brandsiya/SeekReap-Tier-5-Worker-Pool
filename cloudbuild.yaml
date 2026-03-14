@@ -1,10 +1,8 @@
 steps:
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/seekreap-worker', '.']
-
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/seekreap-worker:$SHORT_SHA', '.']
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/$PROJECT_ID/seekreap-worker']
-
+    args: ['push', 'gcr.io/$PROJECT_ID/seekreap-worker:$SHORT_SHA']
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -12,17 +10,11 @@ steps:
       - 'deploy'
       - 'seekreap-worker'
       - '--image'
-      - 'gcr.io/$PROJECT_ID/seekreap-worker'
+      - 'gcr.io/$PROJECT_ID/seekreap-worker:$SHORT_SHA'
       - '--region'
       - 'us-central1'
+      - '--platform'
+      - 'managed'
       - '--allow-unauthenticated'
-      - '--command='
-      - '--args='
-      - '--set-env-vars'
-      - 'DATABASE_URL=postgresql://neondb_owner:npg_yX7aHMwIqQC4@ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech:5432/seekreap_neon_db?sslmode=require,TIER4_URL=https://seekreap-tier4-tif2gmgi4q-uc.a.run.app'
-
-options:
-  logging: CLOUD_LOGGING_ONLY
-
 images:
-  - 'gcr.io/$PROJECT_ID/seekreap-worker'
+  - 'gcr.io/$PROJECT_ID/seekreap-worker:$SHORT_SHA'
