@@ -42,7 +42,5 @@ options:
   logging: GCS_ONLY
   machineType: 'E2_HIGHCPU_8'
   logStreamingOption: STREAM_ON
-  env:
-    - 'CLOUDSDK_COMPUTE_REGION=us-central1'
 
 logsBucket: 'gs://seekreap-production_cloudbuild'
