@@ -68,12 +68,17 @@ def update_tier4(submission_id, analysis):
 
 def process_job(job):
     """Process a single job from the queue."""
-    job_id, submission_id, content_hash, content_type = job
-    logger.info(f"Processing job {job_id} for submission {submission_id}")
+    # Note: column names from the database
+    job_id = job['job_id']  # Changed from 'id' to 'job_id'
+    submission_id = job['submission_id']
+    content_hash = job['content_hash']
+    content_type = job['content_type']
     
+    logger.info(f"Processing job {job_id} for submission {submission_id}")
+
     # Call Tier-3 for analysis
     analysis = call_tier3(submission_id, content_hash, content_type)
-    
+
     # Update Tier-4 with results
     if "error" not in analysis:
         success = update_tier4(submission_id, analysis)
@@ -87,7 +92,7 @@ def process_job(job):
 # --- Main Worker Loop ---
 if __name__ == "__main__":
     logger.info("Tier-5 worker started, polling PostgreSQL for jobs...")
-    
+
     # Test database connection
     try:
         conn = get_db()
@@ -99,50 +104,50 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Database connection failed: {e}")
         exit(1)
-    
+
     while True:
         conn = None
         cur = None
         try:
             conn = get_db()
             cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-            
-            # Find a queued job
+
+            # Find a queued job - using correct column names
             cur.execute("""
-                SELECT id, submission_id, content_hash, content_type
+                SELECT job_id, submission_id, content_hash, content_type
                 FROM job_queue
                 WHERE status = 'QUEUED'
                 ORDER BY created_at ASC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             """)
-            
+
             job = cur.fetchone()
-            
+
             if job:
-                job_id = job['id']
+                job_id = job['job_id']
                 logger.info(f"Found job {job_id}, marking as PROCESSING")
-                
+
                 # Mark as processing
                 cur.execute("""
                     UPDATE job_queue
                     SET status = 'PROCESSING',
                         updated_at = NOW(),
                         attempts = attempts + 1
-                    WHERE id = %s
+                    WHERE job_id = %s
                 """, (job_id,))
                 conn.commit()
-                
+
                 # Process the job
                 success, error_msg = process_job(job)
-                
+
                 if success:
                     # Mark as completed
                     cur.execute("""
                         UPDATE job_queue
                         SET status = 'COMPLETED',
                             updated_at = NOW()
-                        WHERE id = %s
+                        WHERE job_id = %s
                     """, (job_id,))
                 else:
                     # Mark as failed with error
@@ -151,18 +156,20 @@ if __name__ == "__main__":
                         SET status = 'FAILED',
                             updated_at = NOW(),
                             last_error = %s
-                        WHERE id = %s
+                        WHERE job_id = %s
                     """, (error_msg, job_id))
                     logger.error(f"Job {job_id} failed: {error_msg}")
-                
+
                 conn.commit()
                 logger.info(f"Job {job_id} processing complete")
             else:
                 # No jobs, sleep briefly
                 time.sleep(3)
-                
+
         except Exception as e:
             logger.error(f"Error in main loop: {e}")
+            import traceback
+            traceback.print_exc()
             time.sleep(5)
         finally:
             if cur:
