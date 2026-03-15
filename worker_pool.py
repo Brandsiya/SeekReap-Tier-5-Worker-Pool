@@ -176,14 +176,13 @@ if __name__ == "__main__":
                         WHERE job_id = %s
                     """, (job_id,))
                 else:
-                    # Mark as failed with error
+                    # Mark as failed - no last_error column
                     cur.execute("""
                         UPDATE job_queue
                         SET status = 'FAILED',
-                            updated_at = NOW(),
-                            last_error = %s
+                            updated_at = NOW()
                         WHERE job_id = %s
-                    """, (error_msg, job_id))
+                    """, (job_id,))
                     logger.error(f"Job {job_id} failed: {error_msg}")
 
                 conn.commit()
