@@ -1,9 +1,10 @@
 import time
 import httpx
-import redis
 import logging
 import threading
+import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from google.cloud import pubsub_v1
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -16,28 +17,30 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
 
 def run_health_server():
-    """Runs a simple HTTP server on port 8080 for Cloud Run health checks."""
-    server = HTTPServer(("0.0.0.0", 8080), Handler)
-    logger.info("Health check server listening on port 8080")
+    port = int(os.environ.get('PORT', 8080))
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    logger.info(f"Health check server listening on port {port}")
     server.serve_forever()
 
 # Start health server in background thread
 threading.Thread(target=run_health_server, daemon=True).start()
 logger.info("Health check server started in background thread")
 
-# --- Redis Connection ---
-try:
-    r = redis.Redis(host="127.0.0.1", port=6379, db=0, decode_responses=True)
-    r.ping()
-    logger.info("Connected to Redis successfully")
-except redis.exceptions.ConnectionError as e:
-    logger.error(f"Failed to connect to Redis: {e}")
-    exit(1)
+# --- Pub/Sub Setup ---
+PROJECT_ID = os.environ.get('PROJECT_ID', 'seekreap-production')
+subscription_name = os.environ.get('PUBSUB_SUBSCRIPTION', 'seekreap-worker-sub')
+subscriber = pubsub_v1.SubscriberClient()
+subscription_path = subscriber.subscription_path(PROJECT_ID, subscription_name)
+
+# --- Tier URLs ---
+TIER3_URL = os.environ.get('TIER3_URL', 'https://seekreap-tier3-tif2gmgi4q-uc.a.run.app')
+TIER4_URL = os.environ.get('TIER4_URL', 'https://seekreap-tier4-tif2gmgi4q-uc.a.run.app')
 
 # --- Core Worker Functions ---
 def call_tier3(submission_id):
     try:
-        resp = httpx.post("http://localhost:8000/api/analyze", json={
+        url = f"{TIER3_URL}/api/analyze"
+        resp = httpx.post(url, json={
             "content_id": submission_id,
             "content_type": "youtube_video",
             "content_data": {"audio_similarity": 0.8, "visual_similarity": 0.6}
@@ -50,7 +53,8 @@ def call_tier3(submission_id):
 
 def update_tier4(submission_id, analysis):
     try:
-        resp = httpx.post("http://localhost:8081/api/finalize", json={
+        url = f"{TIER4_URL}/api/finalize"
+        resp = httpx.post(url, json={
             "submission_id": submission_id,
             "analysis": analysis
         }, timeout=30.0)
@@ -59,25 +63,48 @@ def update_tier4(submission_id, analysis):
     except Exception as e:
         logger.error(f"Error updating Tier-4 for {submission_id}: {e}")
 
+def process_message(message):
+    """Process a single Pub/Sub message."""
+    try:
+        submission_id = message.data.decode('utf-8')
+        logger.info(f"Processing job {submission_id}")
+        
+        # Call Tier-3 for analysis
+        analysis = call_tier3(submission_id)
+        
+        # Update Tier-4 with results
+        if "error" not in analysis:
+            update_tier4(submission_id, analysis)
+        else:
+            logger.error(f"Skipping Tier-4 update for {submission_id} due to Tier-3 error.")
+        
+        # Acknowledge the message
+        message.ack()
+        logger.info(f"Successfully processed and acknowledged job {submission_id}")
+        
+    except Exception as e:
+        logger.error(f"Error processing message: {e}")
+        # Negative acknowledgement - message will be redelivered
+        message.nack()
+
 # --- Main Worker Loop ---
 if __name__ == "__main__":
-    logger.info("Tier-5 main worker loop started...")
-    while True:
-        try:
-            # Use blpop for blocking pop with timeout
-            job = r.blpop("jobs", timeout=5)
-            if job:
-                job_id = job[1]
-                logger.info(f"Processing job {job_id}")
-                analysis = call_tier3(job_id)
-                if "error" not in analysis:
-                    update_tier4(job_id, analysis)
-                else:
-                    logger.error(f"Skipping Tier-4 update for {job_id} due to Tier-3 error.")
-        except redis.exceptions.ConnectionError as e:
-            logger.error(f"Redis connection lost: {e}. Reconnecting...")
-            time.sleep(5)
-            continue
-        except Exception as e:
-            logger.error(f"Unexpected error in main loop: {e}")
-            time.sleep(5)
+    logger.info("Tier-5 worker started, listening for Pub/Sub messages...")
+    logger.info(f"Subscribing to: {subscription_path}")
+    
+    # Start listening for messages
+    streaming_pull_future = subscriber.subscribe(
+        subscription_path, 
+        callback=process_message
+    )
+    
+    try:
+        # Keep the main thread alive
+        streaming_pull_future.result()
+    except KeyboardInterrupt:
+        streaming_pull_future.cancel()
+    except Exception as e:
+        logger.error(f"Error in subscriber: {e}")
+        streaming_pull_future.cancel()
+    
+    logger.info("Worker stopped")
