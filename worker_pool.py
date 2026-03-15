@@ -68,26 +68,52 @@ def update_tier4(submission_id, analysis):
 
 def process_job(job):
     """Process a single job from the queue."""
-    # Note: column names from the database
-    job_id = job['job_id']  # Changed from 'id' to 'job_id'
+    job_id = job['job_id']
     submission_id = job['submission_id']
-    content_hash = job['content_hash']
-    content_type = job['content_type']
     
     logger.info(f"Processing job {job_id} for submission {submission_id}")
 
-    # Call Tier-3 for analysis
-    analysis = call_tier3(submission_id, content_hash, content_type)
-
-    # Update Tier-4 with results
-    if "error" not in analysis:
-        success = update_tier4(submission_id, analysis)
-        if success:
-            return True, None
+    # Get content details from submissions table
+    conn = None
+    cur = None
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute("""
+            SELECT content_hash, content_type 
+            FROM submissions 
+            WHERE id = %s
+        """, (submission_id,))
+        submission = cur.fetchone()
+        
+        if not submission:
+            logger.error(f"Submission {submission_id} not found")
+            return False, "Submission not found"
+            
+        content_hash = submission['content_hash']
+        content_type = submission['content_type']
+        
+        # Call Tier-3 for analysis
+        analysis = call_tier3(submission_id, content_hash, content_type)
+        
+        # Update Tier-4 with results
+        if "error" not in analysis:
+            success = update_tier4(submission_id, analysis)
+            if success:
+                return True, None
+            else:
+                return False, "Tier-4 update failed"
         else:
-            return False, "Tier-4 update failed"
-    else:
-        return False, analysis.get("error")
+            return False, analysis.get("error")
+            
+    except Exception as e:
+        logger.error(f"Error in process_job: {e}")
+        return False, str(e)
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 # --- Main Worker Loop ---
 if __name__ == "__main__":
@@ -112,9 +138,9 @@ if __name__ == "__main__":
             conn = get_db()
             cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
-            # Find a queued job - using correct column names
+            # Find a queued job
             cur.execute("""
-                SELECT job_id, submission_id, content_hash, content_type
+                SELECT job_id, submission_id
                 FROM job_queue
                 WHERE status = 'QUEUED'
                 ORDER BY created_at ASC
