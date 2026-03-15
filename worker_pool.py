@@ -34,12 +34,14 @@ def get_db():
 
 # --- Tier URLs ---
 TIER3_URL = os.environ.get('TIER3_URL', 'https://seekreap-tier3-tif2gmgi4q-uc.a.run.app')
-TIER4_URL = os.environ.get('TIER4_URL', 'https://seekreap-tier4-tif2gmgi4q-uc.a.run.app')
+TIER4_URL = os.environ.get('TIER4_URL', 'https://seekreap-tier4-308655322607.us-central1.run.app')
+MAX_RETRIES = 3
 
 # --- Core Worker Functions ---
 def call_tier3(submission_id, content_hash, content_type):
     try:
         url = f"{TIER3_URL}/api/analyze"
+        logger.info(f"Calling Tier-3 at {url}")
         resp = httpx.post(url, json={
             "content_id": submission_id,
             "content_hash": content_hash,
@@ -47,6 +49,7 @@ def call_tier3(submission_id, content_hash, content_type):
             "content_data": {"audio_similarity": 0.8, "visual_similarity": 0.6}
         }, timeout=30.0)
         resp.raise_for_status()
+        logger.info(f"Tier-3 response: {resp.status_code}")
         return resp.json()
     except Exception as e:
         logger.error(f"Error calling Tier-3 for {submission_id}: {e}")
@@ -55,23 +58,27 @@ def call_tier3(submission_id, content_hash, content_type):
 def update_tier4(submission_id, analysis):
     try:
         url = f"{TIER4_URL}/api/finalize"
+        logger.info(f"Calling Tier-4 finalize at {url}")
         resp = httpx.post(url, json={
             "submission_id": submission_id,
             "analysis": analysis
         }, timeout=30.0)
         resp.raise_for_status()
-        logger.info(f"Updated Tier-4 for {submission_id}: {resp.text}")
+        logger.info(f"Tier-4 response: {resp.status_code} - {resp.text}")
         return True
     except Exception as e:
         logger.error(f"Error updating Tier-4 for {submission_id}: {e}")
+        if hasattr(e, 'response') and e.response:
+            logger.error(f"Response status: {e.response.status_code}, body: {e.response.text}")
         return False
 
 def process_job(job):
     """Process a single job from the queue."""
     job_id = job['job_id']
     submission_id = job['submission_id']
+    attempts = job['attempts']
     
-    logger.info(f"Processing job {job_id} for submission {submission_id}")
+    logger.info(f"Processing job {job_id} for submission {submission_id} (attempt {attempts + 1})")
 
     # Get content details from submissions table
     conn = None
@@ -80,7 +87,7 @@ def process_job(job):
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         cur.execute("""
-            SELECT content_hash, content_type 
+            SELECT content_hash, content_type, title, description
             FROM submissions 
             WHERE id = %s
         """, (submission_id,))
@@ -118,6 +125,8 @@ def process_job(job):
 # --- Main Worker Loop ---
 if __name__ == "__main__":
     logger.info("Tier-5 worker started, polling PostgreSQL for jobs...")
+    logger.info(f"TIER3_URL: {TIER3_URL}")
+    logger.info(f"TIER4_URL: {TIER4_URL}")
 
     # Test database connection
     try:
@@ -138,9 +147,9 @@ if __name__ == "__main__":
             conn = get_db()
             cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
-            # Find pending jobs (using correct status 'pending')
+            # Find pending jobs
             cur.execute("""
-                SELECT job_id, submission_id
+                SELECT job_id, submission_id, attempts
                 FROM job_queue
                 WHERE status = 'pending'
                 ORDER BY created_at ASC
@@ -153,7 +162,8 @@ if __name__ == "__main__":
             if jobs:
                 for job in jobs:
                     job_id = job['job_id']
-                    logger.info(f"Found job {job_id}, marking as processing")
+                    attempts = job['attempts']
+                    logger.info(f"Found job {job_id} (attempt {attempts + 1}), marking as processing")
 
                     # Mark as processing
                     cur.execute("""
@@ -174,20 +184,28 @@ if __name__ == "__main__":
                             SET status = 'completed'
                             WHERE job_id = %s
                         """, (job_id,))
+                        logger.info(f"Job {job_id} completed successfully")
                     else:
-                        # Mark as failed
-                        cur.execute("""
-                            UPDATE job_queue
-                            SET status = 'failed'
-                            WHERE job_id = %s
-                        """, (job_id,))
-                        logger.error(f"Job {job_id} failed: {error_msg}")
+                        # Check if we should retry
+                        new_attempts = attempts + 1
+                        if new_attempts >= MAX_RETRIES:
+                            cur.execute("""
+                                UPDATE job_queue
+                                SET status = 'failed'
+                                WHERE job_id = %s
+                            """, (job_id,))
+                            logger.error(f"Job {job_id} failed permanently: {error_msg}")
+                        else:
+                            cur.execute("""
+                                UPDATE job_queue
+                                SET status = 'pending'
+                                WHERE job_id = %s
+                            """, (job_id,))
+                            logger.warning(f"Job {job_id} failed (attempt {new_attempts}), will retry: {error_msg}")
 
                     conn.commit()
-                    logger.info(f"Job {job_id} processing complete")
             else:
-                # No jobs, sleep briefly
-                logger.info("No pending jobs found, sleeping...")
+                logger.debug("No pending jobs found, sleeping...")
                 time.sleep(3)
 
         except Exception as e:
