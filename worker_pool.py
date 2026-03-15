@@ -154,11 +154,10 @@ if __name__ == "__main__":
                 job_id = job['job_id']
                 logger.info(f"Found job {job_id}, marking as PROCESSING")
 
-                # Mark as processing
+                # Mark as processing - no updated_at column
                 cur.execute("""
                     UPDATE job_queue
                     SET status = 'PROCESSING',
-                        updated_at = NOW(),
                         attempts = attempts + 1
                     WHERE job_id = %s
                 """, (job_id,))
@@ -168,19 +167,17 @@ if __name__ == "__main__":
                 success, error_msg = process_job(job)
 
                 if success:
-                    # Mark as completed
+                    # Mark as completed - no updated_at column
                     cur.execute("""
                         UPDATE job_queue
-                        SET status = 'COMPLETED',
-                            updated_at = NOW()
+                        SET status = 'COMPLETED'
                         WHERE job_id = %s
                     """, (job_id,))
                 else:
-                    # Mark as failed - no last_error column
+                    # Mark as failed - no last_error or updated_at columns
                     cur.execute("""
                         UPDATE job_queue
-                        SET status = 'FAILED',
-                            updated_at = NOW()
+                        SET status = 'FAILED'
                         WHERE job_id = %s
                     """, (job_id,))
                     logger.error(f"Job {job_id} failed: {error_msg}")
