@@ -138,54 +138,56 @@ if __name__ == "__main__":
             conn = get_db()
             cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
-            # Find a queued job
+            # Find pending jobs (using correct status 'pending')
             cur.execute("""
                 SELECT job_id, submission_id
                 FROM job_queue
-                WHERE status = 'QUEUED'
+                WHERE status = 'pending'
                 ORDER BY created_at ASC
-                LIMIT 1
+                LIMIT 5
                 FOR UPDATE SKIP LOCKED
             """)
 
-            job = cur.fetchone()
+            jobs = cur.fetchall()
+            
+            if jobs:
+                for job in jobs:
+                    job_id = job['job_id']
+                    logger.info(f"Found job {job_id}, marking as processing")
 
-            if job:
-                job_id = job['job_id']
-                logger.info(f"Found job {job_id}, marking as PROCESSING")
-
-                # Mark as processing - no updated_at column
-                cur.execute("""
-                    UPDATE job_queue
-                    SET status = 'PROCESSING',
-                        attempts = attempts + 1
-                    WHERE job_id = %s
-                """, (job_id,))
-                conn.commit()
-
-                # Process the job
-                success, error_msg = process_job(job)
-
-                if success:
-                    # Mark as completed - no updated_at column
+                    # Mark as processing
                     cur.execute("""
                         UPDATE job_queue
-                        SET status = 'COMPLETED'
+                        SET status = 'processing',
+                            attempts = attempts + 1
                         WHERE job_id = %s
                     """, (job_id,))
-                else:
-                    # Mark as failed - no last_error or updated_at columns
-                    cur.execute("""
-                        UPDATE job_queue
-                        SET status = 'FAILED'
-                        WHERE job_id = %s
-                    """, (job_id,))
-                    logger.error(f"Job {job_id} failed: {error_msg}")
+                    conn.commit()
 
-                conn.commit()
-                logger.info(f"Job {job_id} processing complete")
+                    # Process the job
+                    success, error_msg = process_job(job)
+
+                    if success:
+                        # Mark as completed
+                        cur.execute("""
+                            UPDATE job_queue
+                            SET status = 'completed'
+                            WHERE job_id = %s
+                        """, (job_id,))
+                    else:
+                        # Mark as failed
+                        cur.execute("""
+                            UPDATE job_queue
+                            SET status = 'failed'
+                            WHERE job_id = %s
+                        """, (job_id,))
+                        logger.error(f"Job {job_id} failed: {error_msg}")
+
+                    conn.commit()
+                    logger.info(f"Job {job_id} processing complete")
             else:
                 # No jobs, sleep briefly
+                logger.info("No pending jobs found, sleeping...")
                 time.sleep(3)
 
         except Exception as e:
