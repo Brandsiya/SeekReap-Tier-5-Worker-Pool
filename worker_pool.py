@@ -34,7 +34,7 @@ def get_db():
 
 # --- Tier URLs ---
 TIER3_URL = os.environ.get('TIER3_URL', 'https://seekreap-tier-3-private.onrender.com')
-TIER4_URL = os.environ.get('TIER4_URL', 'https://seekreap-tier4-308655322607.us-central1.run.app')
+TIER4_URL = os.environ.get('TIER4_URL', 'https://seekreap-tier-4-orchestrator-nrn4.onrender.com')
 MAX_RETRIES = 3
 
 # --- Core Worker Functions ---
