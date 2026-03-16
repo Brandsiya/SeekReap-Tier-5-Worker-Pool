@@ -33,7 +33,7 @@ def get_db():
     return psycopg2.connect(os.environ.get('DATABASE_URL'))
 
 # --- Tier URLs ---
-TIER3_URL = os.environ.get('TIER3_URL', 'https://seekreap-tier3-tif2gmgi4q-uc.a.run.app')
+TIER3_URL = os.environ.get('TIER3_URL', 'https://seekreap-tier-3-private.onrender.com')
 TIER4_URL = os.environ.get('TIER4_URL', 'https://seekreap-tier4-308655322607.us-central1.run.app')
 MAX_RETRIES = 3
 
