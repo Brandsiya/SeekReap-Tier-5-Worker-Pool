@@ -19,7 +19,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK")
     def log_message(self, format, *args):
-        pass  # suppress noisy access logs
+        pass
 
 def run_health_server():
     port = int(os.environ.get('PORT', 8080))
@@ -38,23 +38,43 @@ def get_db():
 TIER3_URL = os.environ.get('TIER3_URL', 'https://seekreap-tier-3-private-10.onrender.com')
 TIER4_URL = os.environ.get('TIER4_URL', 'https://seekreap-tier-4-orchestrator-1.onrender.com')
 MAX_RETRIES = 3
+MATCH_THRESHOLD = 0.85
+
+
+# --- P1: Retry wrapper for all HTTP calls ---
+def http_post(url, payload, timeout=60.0, retries=3, backoff=2):
+    """
+    POST with retry + empty-response guard.
+    Returns parsed JSON dict, or {"error": "..."} on failure.
+    """
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = httpx.post(url, json=payload, timeout=timeout)
+            raw = resp.text.strip()
+            if not raw:
+                raise ValueError(f"Empty response (HTTP {resp.status_code})")
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                wait = backoff ** attempt
+                logger.warning(f"HTTP POST {url} attempt {attempt} failed: {e} — retrying in {wait}s")
+                time.sleep(wait)
+            else:
+                logger.error(f"HTTP POST {url} failed after {retries} attempts: {e}")
+    return {"error": str(last_err)}
 
 
 # --- Chromaprint similarity ---
 def chromaprint_similarity(fp1: str, fp2: str) -> float:
-    """
-    Compare two Chromaprint fingerprints (base64url strings).
-    Returns similarity 0.0–1.0 (1.0 = identical).
-    Uses bit-level Hamming distance on the decoded 32-bit integer arrays.
-    """
+    """Hamming distance on decoded 32-bit Chromaprint integer arrays."""
     try:
-        # Add padding and decode base64url
         def decode(fp):
             pad = (4 - len(fp) % 4) % 4
             return base64.urlsafe_b64decode(fp + '=' * pad)
-
         b1, b2 = decode(fp1), decode(fp2)
-        # Trim to same length (multiples of 4 bytes = 32-bit ints)
         n = min(len(b1), len(b2)) & ~3
         if n == 0:
             return 0.0
@@ -68,44 +88,64 @@ def chromaprint_similarity(fp1: str, fp2: str) -> float:
         return 0.0
 
 
-# --- Audio fingerprint from Tier-3 ---
-def get_audio_fingerprint(content_url: str):
+# --- P4: Fingerprint cache — look up existing fingerprint by content_url ---
+def get_cached_fingerprint(conn, content_url: str, exclude_submission_id: str = None):
     """
-    Call Tier-3 /internal/audio-fingerprint.
-    Returns {"fingerprint": "...", "duration": 120.0} or {"error": "..."}
+    Return (fingerprint, duration) if a completed chromaprint-v1 fingerprint
+    already exists for this content_url. Skips the 2-min ffmpeg pipeline.
     """
     try:
-        resp = httpx.post(
-            f"{TIER3_URL}/internal/audio-fingerprint",
-            json={"content_url": content_url},
-            timeout=240.0  # ffmpeg pipeline can take ~2min
-        )
-        resp.raise_for_status()
-        return resp.json()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT audio_fingerprint, audio_duration
+            FROM fingerprints
+            WHERE content_url = %s
+              AND audio_fingerprint IS NOT NULL
+              AND fingerprint_version = 'chromaprint-v1'
+              AND submission_id != %s
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, (content_url, exclude_submission_id or '00000000-0000-0000-0000-000000000000'))
+        row = cur.fetchone()
+        cur.close()
+        if row:
+            logger.info(f"Cache HIT for {content_url[:60]} — skipping ffmpeg")
+            return row[0], row[1]
+        return None, None
     except Exception as e:
-        logger.error(f"Audio fingerprint error for {content_url}: {e}")
-        return {"error": str(e)}
+        logger.error(f"Cache lookup error: {e}")
+        return None, None
+
+
+# --- Audio fingerprint from Tier-3 ---
+def get_audio_fingerprint(content_url: str):
+    """Call Tier-3 /internal/audio-fingerprint with retry."""
+    result = http_post(
+        f"{TIER3_URL}/internal/audio-fingerprint",
+        {"content_url": content_url},
+        timeout=240.0,
+        retries=2,
+        backoff=3
+    )
+    return result
 
 
 # --- Look up existing fingerprints for similarity ---
 def find_best_match(conn, fingerprint: str, exclude_submission_id: str = None):
-    """
-    Query fingerprints table for the most similar existing fingerprint.
-    Returns (best_similarity, best_submission_id) or (0.0, None).
-    """
+    """Return (best_similarity, best_submission_id) against stored fingerprints."""
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         cur.execute("""
             SELECT submission_id, audio_fingerprint
             FROM fingerprints
             WHERE audio_fingerprint IS NOT NULL
+              AND fingerprint_version = 'chromaprint-v1'
               AND submission_id != %s
             ORDER BY created_at DESC
             LIMIT 100
         """, (exclude_submission_id or '00000000-0000-0000-0000-000000000000',))
         rows = cur.fetchall()
         cur.close()
-
         best_sim = 0.0
         best_id = None
         for row in rows:
@@ -113,7 +153,6 @@ def find_best_match(conn, fingerprint: str, exclude_submission_id: str = None):
             if sim > best_sim:
                 best_sim = sim
                 best_id = str(row['submission_id'])
-
         return best_sim, best_id
     except Exception as e:
         logger.error(f"Fingerprint lookup error: {e}")
@@ -133,15 +172,15 @@ def store_fingerprint(conn, submission_id, creator_id, content_url, fingerprint,
         """, (submission_id, creator_id, content_url, fingerprint, duration, thumbnail_url))
         conn.commit()
         cur.close()
-        logger.info(f"Stored fingerprint for submission {submission_id}")
+        logger.info(f"Stored fingerprint for {submission_id}")
     except Exception as e:
         conn.rollback()
         logger.error(f"Failed to store fingerprint: {e}")
 
 
-# --- Store match if similarity above threshold ---
+# --- Store match ---
 def store_match(conn, submission_id, matched_submission_id, similarity_score, fingerprint_version='chromaprint-v1'):
-    """Write to content_matches when similarity >= 0.85."""
+    """Write to content_matches when similarity >= MATCH_THRESHOLD."""
     try:
         cur = conn.cursor()
         cur.execute("""
@@ -163,26 +202,24 @@ def store_match(conn, submission_id, matched_submission_id, similarity_score, fi
 
 # --- Finalize via Tier-4 ---
 def update_tier4(submission_id, analysis):
-    try:
-        resp = httpx.post(
-            f"{TIER4_URL}/api/finalize",
-            json={"submission_id": submission_id, "analysis": analysis},
-            timeout=60.0
-        )
-        resp.raise_for_status()
-        logger.info(f"Tier-4 finalize: {resp.status_code} - {resp.text}")
-        return True
-    except Exception as e:
-        logger.error(f"Tier-4 finalize error for {submission_id}: {e}")
-        if hasattr(e, 'response') and e.response:
-            logger.error(f"Response: {e.response.status_code} {e.response.text}")
+    result = http_post(
+        f"{TIER4_URL}/api/finalize",
+        {"submission_id": submission_id, "analysis": analysis},
+        timeout=60.0,
+        retries=3,
+        backoff=2
+    )
+    if "error" in result:
+        logger.error(f"Tier-4 finalize error for {submission_id}: {result['error']}")
         return False
+    logger.info(f"Tier-4 finalize OK for {submission_id}")
+    return True
 
 
 # --- Process a single job ---
 def process_job(job):
     job_id = job['job_id']
-    submission_id = job['submission_id']
+    submission_id = str(job['submission_id'])
     attempts = job['attempts']
     logger.info(f"Processing job {job_id} for submission {submission_id} (attempt {attempts + 1})")
 
@@ -203,67 +240,87 @@ def process_job(job):
             logger.error(f"Submission {submission_id} not found")
             return False, "Submission not found"
 
-        content_url = sub['content_url']
-        creator_id = str(sub['creator_id'])
+        content_url   = sub['content_url']
+        creator_id    = str(sub['creator_id'])
         thumbnail_url = sub['content_preview_url'] or ''
 
-        # Step 1: Get audio fingerprint from Tier-3
-        logger.info(f"Requesting audio fingerprint for {content_url}")
-        fp_result = get_audio_fingerprint(content_url)
+        # --- P4: Check fingerprint cache before calling Tier-3 ---
+        fingerprint, duration = get_cached_fingerprint(conn, content_url, submission_id)
+        cache_hit = fingerprint is not None
 
-        if "error" in fp_result:
-            logger.warning(f"Audio fingerprint failed: {fp_result['error']} — falling back to dummy score")
-            audio_similarity = 0.0
-            fingerprint = None
-            duration = None
+        if not cache_hit:
+            # Step 1: Get audio fingerprint from Tier-3 (2-min ffmpeg pipeline)
+            logger.info(f"Cache MISS — requesting audio fingerprint for {content_url}")
+            fp_result = get_audio_fingerprint(content_url)
+
+            if "error" in fp_result:
+                logger.warning(f"Audio fingerprint failed: {fp_result['error']} — falling back to dummy score")
+                audio_similarity = 0.0
+                fingerprint = None
+                duration = None
+            else:
+                fingerprint = fp_result.get("fingerprint")
+                duration = fp_result.get("duration")
+                logger.info(f"Got fingerprint (duration={duration}s)")
         else:
-            fingerprint = fp_result.get("fingerprint")
-            duration = fp_result.get("duration")
-            logger.info(f"Got fingerprint (duration={duration}s)")
+            logger.info(f"Using cached fingerprint (duration={duration}s)")
 
-            # Step 2: Compare against existing fingerprints
+        # Step 2: Compare + store if we have a fingerprint
+        audio_similarity = 0.0
+        matched_id = None
+        duplicate_content = False
+
+        if fingerprint:
             audio_similarity, matched_id = find_best_match(conn, fingerprint, submission_id)
             logger.info(f"Best audio match: similarity={audio_similarity:.3f} matched_id={matched_id}")
 
-            # Step 2b: Store match record if above threshold
-            MATCH_THRESHOLD = 0.85
+            # P2: Store match record + set duplicate flag
             if audio_similarity >= MATCH_THRESHOLD and matched_id:
                 store_match(conn, submission_id, matched_id, audio_similarity)
+                duplicate_content = True
                 logger.info(f"⚠️  MATCH DETECTED: similarity={audio_similarity:.3f} >= {MATCH_THRESHOLD}")
 
-            # Step 3: Store fingerprint
-            store_fingerprint(conn, submission_id, creator_id, content_url,
-                              fingerprint, duration, thumbnail_url)
+            # Step 3: Store fingerprint (skip if cache hit — already stored)
+            if not cache_hit:
+                store_fingerprint(conn, submission_id, creator_id, content_url,
+                                  fingerprint, duration, thumbnail_url)
 
-        # Step 4: Call Tier-3 /api/analyze with real similarity score
-        try:
-            analyze_resp = httpx.post(
-                f"{TIER3_URL}/api/analyze",
-                json={
-                    "content_id": submission_id,
-                    "content_hash": sub['content_hash'],
-                    "content_type": sub['content_type'],
-                    "content_data": {
-                        "audio_similarity": round(audio_similarity, 4),
-                        "visual_similarity": 0.0,
-                        "flags": ["audio_match"] if audio_similarity > 0.8 else []
-                    }
-                },
-                timeout=60.0
-            )
-            analyze_resp.raise_for_status()
-            analysis = analyze_resp.json()
-            logger.info(f"Analysis: score={analysis.get('risk_score')} level={analysis.get('risk_level')}")
-        except Exception as e:
-            logger.error(f"Tier-3 analyze error: {e}")
-            return False, str(e)
+        # --- P2: Build enriched flags for risk scoring ---
+        flags = []
+        if audio_similarity > MATCH_THRESHOLD:
+            flags.append("audio_match")
+        if duplicate_content:
+            flags.append("duplicate_content")
+
+        # Step 4: Call Tier-3 /api/analyze with enriched similarity + flags
+        analyze_payload = {
+            "content_id": submission_id,
+            "content_hash": sub['content_hash'],
+            "content_type": sub['content_type'],
+            "content_data": {
+                "audio_similarity": round(audio_similarity, 4),
+                "visual_similarity": 0.0,
+                "duplicate_content": duplicate_content,
+                "flags": flags
+            }
+        }
+        analysis = http_post(
+            f"{TIER3_URL}/api/analyze",
+            analyze_payload,
+            timeout=60.0,
+            retries=2,
+            backoff=2
+        )
+
+        if "error" in analysis:
+            logger.error(f"Tier-3 analyze error: {analysis['error']}")
+            return False, analysis["error"]
+
+        logger.info(f"Analysis: score={analysis.get('risk_score')} level={analysis.get('risk_level')} flags={flags}")
 
         # Step 5: Finalize via Tier-4
-        if "error" not in analysis:
-            success = update_tier4(submission_id, analysis)
-            return (True, None) if success else (False, "Tier-4 update failed")
-        else:
-            return False, analysis.get("error")
+        success = update_tier4(submission_id, analysis)
+        return (True, None) if success else (False, "Tier-4 update failed")
 
     except Exception as e:
         logger.error(f"process_job error: {e}")
@@ -279,6 +336,7 @@ if __name__ == "__main__":
     logger.info("Tier-5 worker started, polling PostgreSQL for jobs...")
     logger.info(f"TIER3_URL: {TIER3_URL}")
     logger.info(f"TIER4_URL: {TIER4_URL}")
+    logger.info(f"MATCH_THRESHOLD: {MATCH_THRESHOLD}")
 
     try:
         conn = get_db()
@@ -297,7 +355,6 @@ if __name__ == "__main__":
         try:
             conn = get_db()
             cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-
             cur.execute("""
                 SELECT job_id, submission_id, attempts
                 FROM job_queue
@@ -310,7 +367,7 @@ if __name__ == "__main__":
 
             if jobs:
                 for job in jobs:
-                    job_id = job['job_id']
+                    job_id   = job['job_id']
                     attempts = job['attempts']
                     logger.info(f"Found job {job_id} (attempt {attempts + 1}), marking as processing")
 
@@ -334,7 +391,6 @@ if __name__ == "__main__":
                         else:
                             cur.execute("UPDATE job_queue SET status = 'pending' WHERE job_id = %s", (job_id,))
                             logger.warning(f"Job {job_id} failed (attempt {new_attempts}), will retry: {error_msg}")
-
                     conn.commit()
             else:
                 logger.debug("No pending jobs, sleeping...")
