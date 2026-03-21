@@ -139,6 +139,28 @@ def store_fingerprint(conn, submission_id, creator_id, content_url, fingerprint,
         logger.error(f"Failed to store fingerprint: {e}")
 
 
+# --- Store match if similarity above threshold ---
+def store_match(conn, submission_id, matched_submission_id, similarity_score, fingerprint_version='chromaprint-v1'):
+    """Write to content_matches when similarity >= 0.85."""
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO content_matches
+                (submission_id, matched_submission_id, similarity_score,
+                 match_type, fingerprint_version)
+            VALUES (%s, %s, %s, 'audio', %s)
+            ON CONFLICT (submission_id, matched_submission_id, match_type) DO UPDATE
+                SET similarity_score = EXCLUDED.similarity_score,
+                    detected_at = NOW()
+        """, (submission_id, matched_submission_id, similarity_score, fingerprint_version))
+        conn.commit()
+        cur.close()
+        logger.info(f"Match stored: {submission_id[:8]}... ~ {matched_submission_id[:8]}... score={similarity_score:.3f}")
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Failed to store match: {e}")
+
+
 # --- Finalize via Tier-4 ---
 def update_tier4(submission_id, analysis):
     try:
@@ -202,6 +224,12 @@ def process_job(job):
             # Step 2: Compare against existing fingerprints
             audio_similarity, matched_id = find_best_match(conn, fingerprint, submission_id)
             logger.info(f"Best audio match: similarity={audio_similarity:.3f} matched_id={matched_id}")
+
+            # Step 2b: Store match record if above threshold
+            MATCH_THRESHOLD = 0.85
+            if audio_similarity >= MATCH_THRESHOLD and matched_id:
+                store_match(conn, submission_id, matched_id, audio_similarity)
+                logger.info(f"⚠️  MATCH DETECTED: similarity={audio_similarity:.3f} >= {MATCH_THRESHOLD}")
 
             # Step 3: Store fingerprint
             store_fingerprint(conn, submission_id, creator_id, content_url,
