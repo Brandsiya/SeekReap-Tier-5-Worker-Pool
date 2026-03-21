@@ -47,7 +47,7 @@ def call_tier3(submission_id, content_hash, content_type):
             "content_hash": content_hash,
             "content_type": content_type,
             "content_data": {"audio_similarity": 0.8, "visual_similarity": 0.6}
-        }, timeout=30.0)
+        }, timeout=60.0)
         resp.raise_for_status()
         logger.info(f"Tier-3 response: {resp.status_code}")
         return resp.json()
@@ -62,7 +62,7 @@ def update_tier4(submission_id, analysis):
         resp = httpx.post(url, json={
             "submission_id": submission_id,
             "analysis": analysis
-        }, timeout=30.0)
+        }, timeout=60.0)
         resp.raise_for_status()
         logger.info(f"Tier-4 response: {resp.status_code} - {resp.text}")
         return True
