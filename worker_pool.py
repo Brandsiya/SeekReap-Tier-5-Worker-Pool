@@ -295,7 +295,11 @@ def process_job(job):
 
         # --- P2: Build enriched flags for risk scoring ---
         flags = []
-        if audio_similarity > MATCH_THRESHOLD:
+        if audio_similarity >= 0.95:
+            flags.append("high_confidence_duplicate")
+            flags.append("audio_match")
+        elif audio_similarity >= MATCH_THRESHOLD:
+            flags.append("probable_duplicate")
             flags.append("audio_match")
         if duplicate_content:
             flags.append("duplicate_content")
