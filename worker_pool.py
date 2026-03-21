@@ -181,17 +181,25 @@ def store_fingerprint(conn, submission_id, creator_id, content_url, fingerprint,
 # --- Store match ---
 def store_match(conn, submission_id, matched_submission_id, similarity_score, fingerprint_version='chromaprint-v1'):
     """Write to content_matches when similarity >= MATCH_THRESHOLD."""
+    # Severity is computed at detection time and persisted — never re-derived from score later
+    if similarity_score >= 0.95:
+        severity = 'high'
+    elif similarity_score >= 0.85:
+        severity = 'medium'
+    else:
+        severity = 'low'
     try:
         cur = conn.cursor()
         cur.execute("""
             INSERT INTO content_matches
                 (submission_id, matched_submission_id, similarity_score,
-                 match_type, fingerprint_version)
-            VALUES (%s, %s, %s, 'audio', %s)
+                 match_type, fingerprint_version, severity)
+            VALUES (%s, %s, %s, 'audio', %s, %s)
             ON CONFLICT (submission_id, matched_submission_id, match_type) DO UPDATE
                 SET similarity_score = EXCLUDED.similarity_score,
+                    severity = EXCLUDED.severity,
                     detected_at = NOW()
-        """, (submission_id, matched_submission_id, similarity_score, fingerprint_version))
+        """, (submission_id, matched_submission_id, similarity_score, fingerprint_version, severity))
         conn.commit()
         cur.close()
         logger.info(f"Match stored: {submission_id[:8]}... ~ {matched_submission_id[:8]}... score={similarity_score:.3f}")
