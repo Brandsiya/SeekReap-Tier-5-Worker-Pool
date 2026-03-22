@@ -3,6 +3,7 @@ import httpx
 import logging
 import threading
 import os
+import socket
 import base64
 import struct
 import psycopg2
@@ -60,6 +61,7 @@ def get_db():
 TIER3_URL = os.environ.get('TIER3_URL', 'https://seekreap-tier-3-private-10.onrender.com')
 TIER4_URL = os.environ.get('TIER4_URL', 'https://seekreap-tier-4-orchestrator-1.onrender.com')
 MAX_RETRIES = 3
+WORKER_HOST = socket.gethostname()
 MATCH_THRESHOLD = 0.85
 
 
@@ -519,9 +521,10 @@ if __name__ == "__main__":
                     cur.execute("""
                         UPDATE job_queue
                         SET status = 'processing', attempts = attempts + 1,
-                            processing_started_at = NOW()
+                            processing_started_at = NOW(),
+                            processing_host = %s
                         WHERE job_id = %s
-                    """, (job_id,))
+                    """, (WORKER_HOST, job_id,))
                     conn.commit()
 
                     success, error_msg = process_job(job)
