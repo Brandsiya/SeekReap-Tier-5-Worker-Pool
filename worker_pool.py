@@ -117,6 +117,64 @@ def get_cached_fingerprint(conn, content_url: str, exclude_submission_id: str = 
         return None, None
 
 
+# --- Visual pHash fingerprint from Tier-3 ---
+def get_visual_fingerprint(thumbnail_url: str):
+    """Call Tier-3 /internal/visual-fingerprint with retry."""
+    if not thumbnail_url:
+        return {"error": "no thumbnail_url"}
+    return http_post(
+        f"{TIER3_URL}/internal/visual-fingerprint",
+        {"thumbnail_url": thumbnail_url},
+        timeout=30.0,
+        retries=2,
+        backoff=2
+    )
+
+
+def phash_similarity(phash1: str, phash2: str) -> float:
+    """Hamming distance on 64-bit perceptual hash strings. Returns 0.0-1.0."""
+    try:
+        if not phash1 or not phash2 or len(phash1) != len(phash2):
+            return 0.0
+        # phash strings are hex — convert to int and count differing bits
+        h1 = int(phash1, 16)
+        h2 = int(phash2, 16)
+        xor = h1 ^ h2
+        differing_bits = bin(xor).count('1')
+        total_bits = len(phash1) * 4  # each hex char = 4 bits
+        return 1.0 - (differing_bits / total_bits)
+    except Exception as e:
+        logger.warning(f"pHash comparison error: {e}")
+        return 0.0
+
+
+def find_best_visual_match(conn, phash: str, exclude_submission_id: str = None):
+    """Return (best_similarity, best_submission_id) against stored visual pHashes."""
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute("""
+            SELECT submission_id, visual_phash
+            FROM fingerprints
+            WHERE visual_phash IS NOT NULL
+              AND submission_id != %s
+            ORDER BY created_at DESC
+            LIMIT 200
+        """, (exclude_submission_id or '00000000-0000-0000-0000-000000000000',))
+        rows = cur.fetchall()
+        cur.close()
+        best_sim = 0.0
+        best_id = None
+        for row in rows:
+            sim = phash_similarity(phash, row['visual_phash'])
+            if sim > best_sim:
+                best_sim = sim
+                best_id = str(row['submission_id'])
+        return best_sim, best_id
+    except Exception as e:
+        logger.error(f"Visual fingerprint lookup error: {e}")
+        return 0.0, None
+
+
 # --- Audio fingerprint from Tier-3 ---
 def get_audio_fingerprint(content_url: str):
     """Call Tier-3 /internal/audio-fingerprint with retry."""
@@ -160,19 +218,19 @@ def find_best_match(conn, fingerprint: str, exclude_submission_id: str = None):
 
 
 # --- Store fingerprint ---
-def store_fingerprint(conn, submission_id, creator_id, content_url, fingerprint, duration, thumbnail_url):
+def store_fingerprint(conn, submission_id, creator_id, content_url, fingerprint, duration, thumbnail_url, visual_phash=None):
     try:
         cur = conn.cursor()
         cur.execute("""
             INSERT INTO fingerprints
                 (submission_id, creator_id, content_url, audio_fingerprint,
-                 audio_duration, thumbnail_url, fingerprint_version)
-            VALUES (%s, %s, %s, %s, %s, %s, 'chromaprint-v1')
+                 audio_duration, thumbnail_url, visual_phash, fingerprint_version)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'chromaprint-v1')
             ON CONFLICT DO NOTHING
-        """, (submission_id, creator_id, content_url, fingerprint, duration, thumbnail_url))
+        """, (submission_id, creator_id, content_url, fingerprint, duration, thumbnail_url, visual_phash))
         conn.commit()
         cur.close()
-        logger.info(f"Stored fingerprint for {submission_id}")
+        logger.info(f"Stored fingerprint for {submission_id} (phash={'yes' if visual_phash else 'none'})")
     except Exception as e:
         conn.rollback()
         logger.error(f"Failed to store fingerprint: {e}")
@@ -294,6 +352,7 @@ def process_job(job):
                                   fingerprint, duration, thumbnail_url)
 
         # --- P2: Build enriched flags for risk scoring ---
+        VISUAL_THRESHOLD = 0.85
         flags = []
         if audio_similarity >= 0.95:
             flags.append("high_confidence_duplicate")
@@ -301,6 +360,8 @@ def process_job(job):
         elif audio_similarity >= MATCH_THRESHOLD:
             flags.append("probable_duplicate")
             flags.append("audio_match")
+        if visual_similarity >= VISUAL_THRESHOLD:
+            flags.append("visual_match")
         if duplicate_content:
             flags.append("duplicate_content")
 
@@ -311,7 +372,7 @@ def process_job(job):
             "content_type": sub['content_type'],
             "content_data": {
                 "audio_similarity": round(audio_similarity, 4),
-                "visual_similarity": 0.0,
+                "visual_similarity": round(visual_similarity, 4),
                 "duplicate_content": duplicate_content,
                 "flags": flags
             }
