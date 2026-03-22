@@ -332,6 +332,9 @@ def process_job(job):
         else:
             logger.info(f"Using cached fingerprint (duration={duration}s)")
 
+        # Constants for this job
+        VISUAL_THRESHOLD = 0.85
+
         # Step 2a: Visual pHash fingerprint
         visual_phash = None
         visual_similarity = 0.0
@@ -378,7 +381,6 @@ def process_job(job):
                               None, None, thumbnail_url, visual_phash)
 
         # --- P2: Build enriched flags for risk scoring ---
-        VISUAL_THRESHOLD = 0.85
         flags = []
         if audio_similarity >= 0.95:
             flags.append("high_confidence_duplicate")
