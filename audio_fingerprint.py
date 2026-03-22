@@ -9,7 +9,7 @@ import psycopg2, uuid as _uv
 logger = logging.getLogger(__name__)
 
 DB_URL    = os.environ.get("DATABASE_URL",
-    "postgresql://neondb_owner:npg_yX7aHMwIqQC4@ep-rapid-base-ai27r1sa-pooler.c-4.us-east-1.aws.neon.tech:5432/seekreap_neon_db?sslmode=require")
+    os.environ["DATABASE_URL"])
 TIER3_URL = os.environ.get("TIER3_URL",
     "https://seekreap-tier3-tif2gmgi4q-uc.a.run.app")
 
