@@ -237,8 +237,9 @@ def store_fingerprint(conn, submission_id, creator_id, content_url, fingerprint,
 
 
 # --- Store match ---
-def store_match(conn, submission_id, matched_submission_id, similarity_score, fingerprint_version='chromaprint-v1'):
-    """Write to content_matches when similarity >= MATCH_THRESHOLD."""
+def store_match(conn, submission_id, matched_submission_id, similarity_score,
+                fingerprint_version='chromaprint-v1', match_type='audio'):
+    """Write to content_matches when similarity >= threshold."""
     # Severity is computed at detection time and persisted — never re-derived from score later
     if similarity_score >= 0.95:
         severity = 'high'
@@ -252,12 +253,12 @@ def store_match(conn, submission_id, matched_submission_id, similarity_score, fi
             INSERT INTO content_matches
                 (submission_id, matched_submission_id, similarity_score,
                  match_type, fingerprint_version, severity)
-            VALUES (%s, %s, %s, 'audio', %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (submission_id, matched_submission_id, match_type) DO UPDATE
                 SET similarity_score = EXCLUDED.similarity_score,
                     severity = EXCLUDED.severity,
                     detected_at = NOW()
-        """, (submission_id, matched_submission_id, similarity_score, fingerprint_version, severity))
+        """, (submission_id, matched_submission_id, similarity_score, match_type, fingerprint_version, severity))
         conn.commit()
         cur.close()
         logger.info(f"Match stored: {submission_id[:8]}... ~ {matched_submission_id[:8]}... score={similarity_score:.3f}")
@@ -342,10 +343,15 @@ def process_job(job):
             else:
                 logger.warning(f"Visual fingerprint failed: {vfp_result['error']}")
 
-        # Step 2b: Compare visual pHash against stored pHashes
+        # Step 2b: Compare visual pHash against stored pHashes + store match
+        visual_matched_id = None
         if visual_phash:
             visual_similarity, visual_matched_id = find_best_visual_match(conn, visual_phash, submission_id)
             logger.info(f"Best visual match: similarity={visual_similarity:.3f} matched_id={visual_matched_id}")
+            if visual_similarity >= VISUAL_THRESHOLD and visual_matched_id:
+                store_match(conn, submission_id, visual_matched_id, visual_similarity,
+                            fingerprint_version='phash-v1', match_type='visual')
+                logger.info(f"🖼️  VISUAL MATCH: similarity={visual_similarity:.3f}")
 
         # Step 2c: Compare audio + store matches
         audio_similarity = 0.0
