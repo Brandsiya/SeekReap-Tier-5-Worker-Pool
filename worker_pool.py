@@ -15,9 +15,31 @@ logger = logging.getLogger(__name__)
 # --- Health Check Server ---
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
+        try:
+            conn_h = get_db()
+            cur_h = conn_h.cursor()
+            cur_h.execute("SELECT COUNT(*) FROM job_queue WHERE status='pending'")
+            pending = cur_h.fetchone()[0]
+            cur_h.execute("SELECT COUNT(*) FROM job_queue WHERE status='processing'")
+            processing = cur_h.fetchone()[0]
+            cur_h.execute("SELECT COUNT(*) FROM job_queue WHERE status='failed' AND created_at > NOW() - INTERVAL '24 hours'")
+            failed_24h = cur_h.fetchone()[0]
+            cur_h.close(); conn_h.close()
+            import json as _json
+            body = _json.dumps({
+                "status": "ok",
+                "queue_depth": pending,
+                "processing": processing,
+                "failed_24h": failed_24h
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception:
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
     def log_message(self, format, *args):
         pass
 
