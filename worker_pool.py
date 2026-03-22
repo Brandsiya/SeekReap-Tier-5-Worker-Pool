@@ -362,12 +362,12 @@ def process_job(job):
                 duplicate_content = True
                 logger.info(f"⚠️  MATCH DETECTED: similarity={audio_similarity:.3f} >= {MATCH_THRESHOLD}")
 
-            # Step 3: Store fingerprint with visual pHash (skip if cache hit)
-            if not cache_hit:
-                store_fingerprint(conn, submission_id, creator_id, content_url,
-                                  fingerprint, duration, thumbnail_url, visual_phash)
-        elif not cache_hit and visual_phash:
-            # Audio failed but we have visual — store what we have
+            # Step 3: Always store fingerprint for this submission
+            # Cache hit = reuse cached audio data, but still write a row with visual_phash
+            store_fingerprint(conn, submission_id, creator_id, content_url,
+                              fingerprint, duration, thumbnail_url, visual_phash)
+        elif visual_phash:
+            # Audio failed/missing but we have visual — store what we have
             store_fingerprint(conn, submission_id, creator_id, content_url,
                               None, None, thumbnail_url, visual_phash)
 
