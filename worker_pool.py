@@ -331,7 +331,23 @@ def process_job(job):
         else:
             logger.info(f"Using cached fingerprint (duration={duration}s)")
 
-        # Step 2: Compare + store if we have a fingerprint
+        # Step 2a: Visual pHash fingerprint
+        visual_phash = None
+        visual_similarity = 0.0
+        if thumbnail_url:
+            vfp_result = get_visual_fingerprint(thumbnail_url)
+            if "error" not in vfp_result:
+                visual_phash = vfp_result.get("phash")
+                logger.info(f"Got visual pHash: {visual_phash}")
+            else:
+                logger.warning(f"Visual fingerprint failed: {vfp_result['error']}")
+
+        # Step 2b: Compare visual pHash against stored pHashes
+        if visual_phash:
+            visual_similarity, visual_matched_id = find_best_visual_match(conn, visual_phash, submission_id)
+            logger.info(f"Best visual match: similarity={visual_similarity:.3f} matched_id={visual_matched_id}")
+
+        # Step 2c: Compare audio + store matches
         audio_similarity = 0.0
         matched_id = None
         duplicate_content = False
@@ -346,10 +362,14 @@ def process_job(job):
                 duplicate_content = True
                 logger.info(f"⚠️  MATCH DETECTED: similarity={audio_similarity:.3f} >= {MATCH_THRESHOLD}")
 
-            # Step 3: Store fingerprint (skip if cache hit — already stored)
+            # Step 3: Store fingerprint with visual pHash (skip if cache hit)
             if not cache_hit:
                 store_fingerprint(conn, submission_id, creator_id, content_url,
-                                  fingerprint, duration, thumbnail_url)
+                                  fingerprint, duration, thumbnail_url, visual_phash)
+        elif not cache_hit and visual_phash:
+            # Audio failed but we have visual — store what we have
+            store_fingerprint(conn, submission_id, creator_id, content_url,
+                              None, None, thumbnail_url, visual_phash)
 
         # --- P2: Build enriched flags for risk scoring ---
         VISUAL_THRESHOLD = 0.85
