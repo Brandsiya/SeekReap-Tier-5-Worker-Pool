@@ -435,6 +435,28 @@ def process_job(job):
 # --- Main Worker Loop ---
 if __name__ == "__main__":
     logger.info("Tier-5 worker started, polling PostgreSQL for jobs...")
+
+    # Recover stuck jobs from previous crashed workers (processing > 10 min)
+    try:
+        conn_r = get_db()
+        cur_r = conn_r.cursor()
+        cur_r.execute("""
+            UPDATE job_queue
+            SET status = 'pending', attempts = attempts + 1,
+                failure_reason = 'recovered: stuck in processing at startup'
+            WHERE status = 'processing'
+              AND processing_started_at < NOW() - INTERVAL '10 minutes'
+            RETURNING job_id
+        """)
+        recovered = cur_r.fetchall()
+        conn_r.commit()
+        cur_r.close(); conn_r.close()
+        if recovered:
+            logger.warning(f"Recovered {len(recovered)} stuck jobs: {[r[0] for r in recovered]}")
+        else:
+            logger.info("No stuck jobs to recover")
+    except Exception as e:
+        logger.error(f"Stuck job recovery failed: {e}")
     logger.info(f"TIER3_URL: {TIER3_URL}")
     logger.info(f"TIER4_URL: {TIER4_URL}")
     logger.info(f"MATCH_THRESHOLD: {MATCH_THRESHOLD}")
@@ -474,7 +496,8 @@ if __name__ == "__main__":
 
                     cur.execute("""
                         UPDATE job_queue
-                        SET status = 'processing', attempts = attempts + 1
+                        SET status = 'processing', attempts = attempts + 1,
+                            processing_started_at = NOW()
                         WHERE job_id = %s
                     """, (job_id,))
                     conn.commit()
@@ -487,10 +510,10 @@ if __name__ == "__main__":
                     else:
                         new_attempts = attempts + 1
                         if new_attempts >= MAX_RETRIES:
-                            cur.execute("UPDATE job_queue SET status = 'failed' WHERE job_id = %s", (job_id,))
+                            cur.execute("UPDATE job_queue SET status = 'failed', failure_reason = %s WHERE job_id = %s", (str(error_msg)[:500], job_id,))
                             logger.error(f"Job {job_id} failed permanently: {error_msg}")
                         else:
-                            cur.execute("UPDATE job_queue SET status = 'pending' WHERE job_id = %s", (job_id,))
+                            cur.execute("UPDATE job_queue SET status = 'pending', failure_reason = %s WHERE job_id = %s", (str(error_msg)[:500], job_id,))
                             logger.warning(f"Job {job_id} failed (attempt {new_attempts}), will retry: {error_msg}")
                     conn.commit()
             else:
