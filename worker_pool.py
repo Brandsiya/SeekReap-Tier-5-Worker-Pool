@@ -31,22 +31,28 @@ class WitnessTimestamp:
     def timestamp_hash(self, content_hash: str) -> Optional[Dict]:
         for endpoint in self.endpoints:
             try:
+                logger.info(f"Attempting witness timestamp at {endpoint} for hash {content_hash[:16]}...")
                 response = requests.post(
                     f"{endpoint}/v1/timestamp",
                     json={"hash": content_hash},
                     timeout=self.timeout
                 )
+                logger.info(f"Witness response status: {response.status_code}")
                 if response.status_code == 200:
                     data = response.json()
+                    logger.info(f"✅ Witness timestamp successful at {endpoint}")
                     return {
                         "attestation": data.get("attestation"),
                         "timestamp": data.get("timestamp"),
                         "endpoint": endpoint,
                         "hash": content_hash
                     }
+                else:
+                    logger.warning(f"Witness {endpoint} returned {response.status_code}: {response.text[:200]}")
             except Exception as e:
                 logger.warning(f"Witness {endpoint} failed: {e}")
                 continue
+        logger.error("All witness endpoints failed")
         return None
 
 witness = WitnessTimestamp()
