@@ -44,92 +44,6 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-# ============================================
-# SELF-HOSTED CONTENT PROOF GENERATOR
-# ============================================
-import hashlib
-import datetime
-
-class SelfHostedProof:
-    """Self-hosted content ownership proof generator.
-    Creates a tamper-evident, timestamped SHA-256 proof record.
-    Legally equivalent to third-party timestamping for establishing
-    prior art — the proof chain is: content -> fingerprint -> hash -> timestamp.
-    """
-
-    @staticmethod
-    def generate(content_hash: str) -> dict:
-        """Generate a self-hosted SHA-256 proof"""
-        try:
-            now = datetime.datetime.utcnow()
-            timestamp_str = now.isoformat() + "Z"
-
-            # Build proof chain: hash the content_hash + timestamp together
-            # so the timestamp is bound to the content — cannot be backdated
-            proof_input = f"{content_hash}:{timestamp_str}:seekreap-v1"
-            proof_hash = hashlib.sha256(proof_input.encode()).hexdigest()
-
-            # Attestation = deterministic identifier for this proof record
-            attestation = f"sr-proof-{proof_hash[:24]}"
-
-            logger.info(f"✅ Self-hosted proof created: {attestation} at {timestamp_str}")
-            return {
-                "success": True,
-                "proof": {
-                    "attestation": attestation,
-                    "timestamp": timestamp_str,
-                    "proof_hash": proof_hash,
-                    "content_hash": content_hash,
-                    "method": "seekreap-sha256-v1",
-                    "endpoint": "self-hosted"
-                }
-            }
-        except Exception as e:
-            logger.error(f"Proof generation error: {e}")
-            return {"success": False, "error": str(e)}
-
-
-# For backward compatibility with existing code
-class WitnessTimestamp:
-    """Alias for SelfHostedProof - maintains compatibility"""
-    
-    def timestamp_hash(self, content_hash: str):
-        return SelfHostedProof.generate(content_hash).get("proof")
-
-
-witness = WitnessTimestamp()
-
-
-def create_blockchain_proof(submission_id: str, audio_fingerprint: str = None,
-                            visual_phash: str = None, thumbnail_url: str = None) -> dict:
-    """Create blockchain proof for a submission"""
-    try:
-        hash_parts = [submission_id]
-        if audio_fingerprint:
-            hash_parts.append(audio_fingerprint[:100])
-        if visual_phash:
-            hash_parts.append(visual_phash)
-        if thumbnail_url:
-            hash_parts.append(thumbnail_url)
-
-        combined = ":".join(hash_parts)
-        content_hash = hashlib.sha256(combined.encode()).hexdigest()
-
-        logger.info(f"Creating content proof for {submission_id[:8]}... hash={content_hash[:16]}...")
-        
-        result = SelfHostedProof.generate(content_hash)
-        
-        if result.get("success"):
-            logger.info(f"✅ Proof created for {submission_id[:8]}")
-            return result
-        else:
-            logger.warning(f"⚠️ Failed to create proof: {result.get('error')}")
-            return result
-            
-    except Exception as e:
-        logger.error(f"Proof creation error: {e}")
-        return {"success": False, "error": str(e)}
-
 def run_health_server():
     port = int(os.environ.get('PORT', 8080))
     server = HTTPServer(("0.0.0.0", port), Handler)
@@ -484,98 +398,33 @@ def process_job(job):
             # Step 3: Always store fingerprint for this submission
             # Cache hit = reuse cached audio data, but still write a row with visual_phash
             store_fingerprint(conn, submission_id, creator_id, content_url,
-
-            # --- Generate content proof after fingerprint storage ---
-            logger.info(f"🔗 Generating proof for submission {submission_id[:8]}...")
-            proof_result = create_blockchain_proof(
-                submission_id=submission_id,
-                audio_fingerprint=fingerprint,
-                visual_phash=visual_phash,
-                thumbnail_url=thumbnail_url
-            )
-            if proof_result.get("success"):
-                import json as json_module
-                cur.execute("""
-                    UPDATE submissions
-                    SET blockchain_proof = %s,
-                        blockchain_verified = FALSE,
-                        blockchain_timestamp = NOW()
-                    WHERE id = %s
-                """, (json_module.dumps(proof_result["proof"]), submission_id))
-                conn.commit()
-                logger.info(f"✅ Proof stored for {submission_id[:8]}: {proof_result['proof'].get('proof_hash', 'N/A')[:16]}...")
-            else:
-                logger.warning(f"⚠️ Proof generation failed for {submission_id[:8]}: {proof_result.get('error')}")
-
-            # --- Generate content proof after fingerprint storage ---
-            logger.info(f"🔗 Generating proof for submission {submission_id[:8]}...")
-            proof_result = create_blockchain_proof(
-                submission_id=submission_id,
-                audio_fingerprint=fingerprint,
-                visual_phash=visual_phash,
-                thumbnail_url=thumbnail_url
-            )
-            if proof_result.get("success"):
-                import json as json_module
-                cur.execute("""
-                    UPDATE submissions
-                    SET blockchain_proof = %s,
-                        blockchain_verified = FALSE,
-                        blockchain_timestamp = NOW()
-                    WHERE id = %s
-                """, (json_module.dumps(proof_result["proof"]), submission_id))
-                conn.commit()
-                logger.info(f"✅ Proof stored for {submission_id[:8]}: {proof_result['proof'].get('proof_hash', 'N/A')[:16]}...")
-            else:
-                logger.warning(f"⚠️ Proof generation failed for {submission_id[:8]}: {proof_result.get('error')}")
                               fingerprint, duration, thumbnail_url, visual_phash)
+            # --- Generate content proof after fingerprint storage ---
+            logger.info("🔗 Generating proof for submission %s..." % submission_id[:8])
+            proof_result = create_blockchain_proof(
+                submission_id=submission_id,
+                audio_fingerprint=fingerprint,
+                visual_phash=visual_phash,
+                thumbnail_url=thumbnail_url
+            )
+            
+            if proof_result.get("success"):
+                import json as json_module
+                cur.execute("""
+                    UPDATE submissions
+                    SET blockchain_proof = %s,
+                        blockchain_verified = FALSE,
+                        blockchain_timestamp = NOW()
+                    WHERE id = %s
+                """, (json_module.dumps(proof_result["proof"]), submission_id))
+                conn.commit()
+                logger.info("✅ Proof stored for %s: %s..." % (submission_id[:8], proof_result["proof"].get("proof_hash", "N/A")[:16]))
+            else:
+                logger.warning("⚠️ Proof generation failed for %s: %s" % (submission_id[:8], proof_result.get("error")))
+            
         elif visual_phash:
             # Audio failed/missing but we have visual — store what we have
             store_fingerprint(conn, submission_id, creator_id, content_url,
-
-            # --- Generate content proof after fingerprint storage ---
-            logger.info(f"🔗 Generating proof for submission {submission_id[:8]}...")
-            proof_result = create_blockchain_proof(
-                submission_id=submission_id,
-                audio_fingerprint=fingerprint,
-                visual_phash=visual_phash,
-                thumbnail_url=thumbnail_url
-            )
-            if proof_result.get("success"):
-                import json as json_module
-                cur.execute("""
-                    UPDATE submissions
-                    SET blockchain_proof = %s,
-                        blockchain_verified = FALSE,
-                        blockchain_timestamp = NOW()
-                    WHERE id = %s
-                """, (json_module.dumps(proof_result["proof"]), submission_id))
-                conn.commit()
-                logger.info(f"✅ Proof stored for {submission_id[:8]}: {proof_result['proof'].get('proof_hash', 'N/A')[:16]}...")
-            else:
-                logger.warning(f"⚠️ Proof generation failed for {submission_id[:8]}: {proof_result.get('error')}")
-
-            # --- Generate content proof after fingerprint storage ---
-            logger.info(f"🔗 Generating proof for submission {submission_id[:8]}...")
-            proof_result = create_blockchain_proof(
-                submission_id=submission_id,
-                audio_fingerprint=fingerprint,
-                visual_phash=visual_phash,
-                thumbnail_url=thumbnail_url
-            )
-            if proof_result.get("success"):
-                import json as json_module
-                cur.execute("""
-                    UPDATE submissions
-                    SET blockchain_proof = %s,
-                        blockchain_verified = FALSE,
-                        blockchain_timestamp = NOW()
-                    WHERE id = %s
-                """, (json_module.dumps(proof_result["proof"]), submission_id))
-                conn.commit()
-                logger.info(f"✅ Proof stored for {submission_id[:8]}: {proof_result['proof'].get('proof_hash', 'N/A')[:16]}...")
-            else:
-                logger.warning(f"⚠️ Proof generation failed for {submission_id[:8]}: {proof_result.get('error')}")
                               None, None, thumbnail_url, visual_phash)
 
         # --- P2: Build enriched flags for risk scoring ---
