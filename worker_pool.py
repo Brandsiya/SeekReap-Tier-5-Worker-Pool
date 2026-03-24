@@ -308,6 +308,25 @@ def update_tier4(submission_id, analysis):
 
 
 # --- Process a single job ---
+def create_blockchain_proof(submission_id, audio_fingerprint, visual_phash, thumbnail_url):
+    import hashlib
+    import datetime
+    hash_parts = [submission_id]
+    if audio_fingerprint:
+        hash_parts.append(audio_fingerprint[:100])
+    if visual_phash:
+        hash_parts.append(visual_phash)
+    if thumbnail_url:
+        hash_parts.append(thumbnail_url)
+    combined = ":".join(hash_parts)
+    content_hash = hashlib.sha256(combined.encode()).hexdigest()
+    now = datetime.datetime.utcnow()
+    timestamp_str = now.isoformat() + "Z"
+    proof_input = f"{content_hash}:{timestamp_str}:seekreap-v1"
+    proof_hash = hashlib.sha256(proof_input.encode()).hexdigest()
+    attestation = f"sr-proof-{proof_hash[:24]}"
+    return {"success": True, "proof": {"attestation": attestation, "timestamp": timestamp_str, "proof_hash": proof_hash, "content_hash": content_hash, "method": "seekreap-sha256-v1", "endpoint": "self-hosted"}}
+
 def process_job(job):
     job_id = job['job_id']
     submission_id = str(job['submission_id'])
@@ -399,29 +418,6 @@ def process_job(job):
             # Cache hit = reuse cached audio data, but still write a row with visual_phash
             store_fingerprint(conn, submission_id, creator_id, content_url,
                               fingerprint, duration, thumbnail_url, visual_phash)
-            # --- Generate content proof after fingerprint storage ---
-            logger.info("🔗 Generating proof for submission %s..." % submission_id[:8])
-            proof_result = create_blockchain_proof(
-                submission_id=submission_id,
-                audio_fingerprint=fingerprint,
-                visual_phash=visual_phash,
-                thumbnail_url=thumbnail_url
-            )
-            
-            if proof_result.get("success"):
-                import json as json_module
-                cur.execute("""
-                    UPDATE submissions
-                    SET blockchain_proof = %s,
-                        blockchain_verified = FALSE,
-                        blockchain_timestamp = NOW()
-                    WHERE id = %s
-                """, (json_module.dumps(proof_result["proof"]), submission_id))
-                conn.commit()
-                logger.info("✅ Proof stored for %s: %s..." % (submission_id[:8], proof_result["proof"].get("proof_hash", "N/A")[:16]))
-            else:
-                logger.warning("⚠️ Proof generation failed for %s: %s" % (submission_id[:8], proof_result.get("error")))
-            
         elif visual_phash:
             # Audio failed/missing but we have visual — store what we have
             store_fingerprint(conn, submission_id, creator_id, content_url,
