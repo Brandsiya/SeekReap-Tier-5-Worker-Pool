@@ -10,6 +10,26 @@ import psycopg2
 import psycopg2.extras
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+def create_blockchain_proof(submission_id, audio_fingerprint, visual_phash, thumbnail_url):
+    import hashlib
+    import datetime
+    hash_parts = [submission_id]
+    if audio_fingerprint:
+        hash_parts.append(audio_fingerprint[:100])
+    if visual_phash:
+        hash_parts.append(visual_phash)
+    if thumbnail_url:
+        hash_parts.append(thumbnail_url)
+    combined = ":".join(hash_parts)
+    content_hash = hashlib.sha256(combined.encode()).hexdigest()
+    now = datetime.datetime.utcnow()
+    timestamp_str = now.isoformat() + "Z"
+    proof_input = f"{content_hash}:{timestamp_str}:seekreap-v1"
+    proof_hash = hashlib.sha256(proof_input.encode()).hexdigest()
+    attestation = f"sr-proof-{proof_hash[:24]}"
+    return {"success": True, "proof": {"attestation": attestation, "timestamp": timestamp_str, "proof_hash": proof_hash, "content_hash": content_hash, "method": "seekreap-sha256-v1", "endpoint": "self-hosted"}}
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
