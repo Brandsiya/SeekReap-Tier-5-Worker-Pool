@@ -1,0 +1,22 @@
+services:
+  - type: worker
+    name: seekreap-tier-5-worker
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python worker_pool.py
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: seekreap-neon-db
+          property: connectionString
+      - key: TIER3_URL
+        value: https://seekreap-tier-3-private-10.onrender.com
+      - key: TIER4_URL
+        value: https://seekreap-tier-4-orchestrator-1.onrender.com
+      - key: MATCH_THRESHOLD
+        value: "0.85"
+      - key: MAX_RETRIES
+        value: "3"
+      - key: WORKER_HOST
+        value: seekreap-tier-5-worker
+    healthCheckPath: /health
