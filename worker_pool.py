@@ -484,10 +484,98 @@ def process_job(job):
             # Step 3: Always store fingerprint for this submission
             # Cache hit = reuse cached audio data, but still write a row with visual_phash
             store_fingerprint(conn, submission_id, creator_id, content_url,
+
+            # --- Generate content proof after fingerprint storage ---
+            logger.info(f"🔗 Generating proof for submission {submission_id[:8]}...")
+            proof_result = create_blockchain_proof(
+                submission_id=submission_id,
+                audio_fingerprint=fingerprint,
+                visual_phash=visual_phash,
+                thumbnail_url=thumbnail_url
+            )
+            if proof_result.get("success"):
+                import json as json_module
+                cur.execute("""
+                    UPDATE submissions
+                    SET blockchain_proof = %s,
+                        blockchain_verified = FALSE,
+                        blockchain_timestamp = NOW()
+                    WHERE id = %s
+                """, (json_module.dumps(proof_result["proof"]), submission_id))
+                conn.commit()
+                logger.info(f"✅ Proof stored for {submission_id[:8]}: {proof_result['proof'].get('proof_hash', 'N/A')[:16]}...")
+            else:
+                logger.warning(f"⚠️ Proof generation failed for {submission_id[:8]}: {proof_result.get('error')}")
+
+            # --- Generate content proof after fingerprint storage ---
+            logger.info(f"🔗 Generating proof for submission {submission_id[:8]}...")
+            proof_result = create_blockchain_proof(
+                submission_id=submission_id,
+                audio_fingerprint=fingerprint,
+                visual_phash=visual_phash,
+                thumbnail_url=thumbnail_url
+            )
+            if proof_result.get("success"):
+                import json as json_module
+                cur.execute("""
+                    UPDATE submissions
+                    SET blockchain_proof = %s,
+                        blockchain_verified = FALSE,
+                        blockchain_timestamp = NOW()
+                    WHERE id = %s
+                """, (json_module.dumps(proof_result["proof"]), submission_id))
+                conn.commit()
+                logger.info(f"✅ Proof stored for {submission_id[:8]}: {proof_result['proof'].get('proof_hash', 'N/A')[:16]}...")
+            else:
+                logger.warning(f"⚠️ Proof generation failed for {submission_id[:8]}: {proof_result.get('error')}")
                               fingerprint, duration, thumbnail_url, visual_phash)
         elif visual_phash:
             # Audio failed/missing but we have visual — store what we have
             store_fingerprint(conn, submission_id, creator_id, content_url,
+
+            # --- Generate content proof after fingerprint storage ---
+            logger.info(f"🔗 Generating proof for submission {submission_id[:8]}...")
+            proof_result = create_blockchain_proof(
+                submission_id=submission_id,
+                audio_fingerprint=fingerprint,
+                visual_phash=visual_phash,
+                thumbnail_url=thumbnail_url
+            )
+            if proof_result.get("success"):
+                import json as json_module
+                cur.execute("""
+                    UPDATE submissions
+                    SET blockchain_proof = %s,
+                        blockchain_verified = FALSE,
+                        blockchain_timestamp = NOW()
+                    WHERE id = %s
+                """, (json_module.dumps(proof_result["proof"]), submission_id))
+                conn.commit()
+                logger.info(f"✅ Proof stored for {submission_id[:8]}: {proof_result['proof'].get('proof_hash', 'N/A')[:16]}...")
+            else:
+                logger.warning(f"⚠️ Proof generation failed for {submission_id[:8]}: {proof_result.get('error')}")
+
+            # --- Generate content proof after fingerprint storage ---
+            logger.info(f"🔗 Generating proof for submission {submission_id[:8]}...")
+            proof_result = create_blockchain_proof(
+                submission_id=submission_id,
+                audio_fingerprint=fingerprint,
+                visual_phash=visual_phash,
+                thumbnail_url=thumbnail_url
+            )
+            if proof_result.get("success"):
+                import json as json_module
+                cur.execute("""
+                    UPDATE submissions
+                    SET blockchain_proof = %s,
+                        blockchain_verified = FALSE,
+                        blockchain_timestamp = NOW()
+                    WHERE id = %s
+                """, (json_module.dumps(proof_result["proof"]), submission_id))
+                conn.commit()
+                logger.info(f"✅ Proof stored for {submission_id[:8]}: {proof_result['proof'].get('proof_hash', 'N/A')[:16]}...")
+            else:
+                logger.warning(f"⚠️ Proof generation failed for {submission_id[:8]}: {proof_result.get('error')}")
                               None, None, thumbnail_url, visual_phash)
 
         # --- P2: Build enriched flags for risk scoring ---
