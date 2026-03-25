@@ -243,19 +243,6 @@ def find_best_visual_match(conn, phash: str, exclude_submission_id: str = None):
 
 
 # --- Audio fingerprint from Tier-3 ---
-def get_audio_fingerprint(content_url: str):
-    """Call Tier-3 /internal/audio-fingerprint with retry."""
-    result = http_post(
-        f"{TIER3_URL}/internal/audio-fingerprint",
-        {"content_url": content_url},
-        timeout=240.0,
-        retries=2,
-        backoff=3
-    )
-    return result
-
-
-# --- Look up existing fingerprints for similarity ---
 def find_best_match(conn, fingerprint: str, exclude_submission_id: str = None):
     """Return (best_similarity, best_submission_id) against stored fingerprints."""
     try:
@@ -672,3 +659,26 @@ if __name__ == "__main__":
         finally:
             if cur: cur.close()
             if conn: conn.close()
+
+
+def get_audio_fingerprint_from_file(file_path: str) -> tuple:
+    """Get audio fingerprint from a local file using Tier-3."""
+    import requests
+    
+    try:
+        with open(file_path, "rb") as f:
+            files = {"file": f}
+            response = requests.post(
+                f"{TIER3_URL}/internal/audio-fingerprint",
+                files=files,
+                timeout=60
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("fingerprint"), data.get("duration")
+            else:
+                logger.error(f"Tier-3 file fingerprint failed: {response.status_code}")
+                return None, None
+    except Exception as e:
+        logger.error(f"Audio fingerprint error: {e}")
+        return None, None
