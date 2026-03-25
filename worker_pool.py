@@ -74,6 +74,29 @@ threading.Thread(target=run_health_server, daemon=True).start()
 logger.info("Health check server started in background thread")
 
 # --- Database Connection ---
+
+def get_audio_fingerprint_from_file(file_path: str) -> tuple:
+    """Get audio fingerprint from a local file using Tier-3."""
+    import requests
+    
+    try:
+        with open(file_path, 'rb') as f:
+            files = {'file': f}
+            response = requests.post(
+                f"{TIER3_URL}/internal/audio-fingerprint-file",
+                files=files,
+                timeout=60
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('fingerprint'), data.get('duration')
+            else:
+                logger.error(f"Tier-3 file fingerprint failed: {response.status_code}")
+                return None, None
+    except Exception as e:
+        logger.error(f"Audio fingerprint error: {e}")
+        return None, None
+
 def get_db():
     return psycopg2.connect(os.environ.get('DATABASE_URL'))
 
@@ -332,7 +355,9 @@ def process_job(job):
     job_id = job['job_id']
     submission_id = str(job['submission_id'])
     attempts = job['attempts']
-    logger.info(f"Processing job {job_id} for submission {submission_id} (attempt {attempts + 1})")
+    params = job.get('params', {})
+    job_type = job.get('job_type', '')
+    logger.info(f"Processing job {job_id} for submission {submission_id} (attempt {attempts + 1}) type={job_type}")
 
     conn = None
     cur = None
@@ -349,6 +374,56 @@ def process_job(job):
         sub = cur.fetchone()
         if not sub:
             logger.error(f"Submission {submission_id} not found")
+
+        # --- Handle file upload jobs ---
+        if job_type == 'file_processing':
+            file_path = params.get('file_path')
+            filename = params.get('filename', 'unknown')
+            
+            if not file_path or not os.path.exists(file_path):
+                logger.error(f"File not found: {file_path}")
+                return False, "File not found"
+            
+            logger.info(f"Processing uploaded file: {filename}")
+            
+            # Get audio fingerprint
+            fingerprint, duration = get_audio_fingerprint_from_file(file_path)
+            
+            if fingerprint:
+                # Store fingerprint
+                store_fingerprint(conn, submission_id, creator_id, content_url,
+                                 fingerprint, duration, thumbnail_url, None)
+                logger.info(f"✅ Fingerprint stored for {submission_id[:8]}")
+                
+                # Generate blockchain proof
+                proof_result = create_blockchain_proof(
+                    submission_id=submission_id,
+                    audio_fingerprint=fingerprint,
+                    visual_phash=None,
+                    thumbnail_url=thumbnail_url
+                )
+                
+                if proof_result.get("success"):
+                    cur.execute("""
+                        UPDATE submissions 
+                        SET blockchain_proof = %s,
+                            blockchain_verified = FALSE,
+                            blockchain_timestamp = NOW()
+                        WHERE id = %s
+                    """, (json.dumps(proof_result["proof"]), submission_id))
+                    conn.commit()
+                    logger.info(f"✅ Proof stored for {submission_id[:8]}")
+                else:
+                    logger.warning(f"⚠️ Proof generation failed: {proof_result.get('error')}")
+                
+                # Clean up temp file
+                os.unlink(file_path)
+                return True, "File processed successfully"
+            else:
+                return False, "Audio fingerprinting failed"
+        
+        # --- Original YouTube/URL processing continues below ---
+
             return False, "Submission not found"
 
         content_url   = sub['content_url']
