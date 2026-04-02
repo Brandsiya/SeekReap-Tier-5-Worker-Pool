@@ -1,0 +1,29 @@
+                                         Table "public.creators"
+        Column         |            Type             | Collation | Nullable |           Default           
+-----------------------+-----------------------------+-----------+----------+-----------------------------
+ id                    | uuid                        |           | not null | gen_random_uuid()
+ email                 | character varying(255)      |           | not null | 
+ name                  | character varying(255)      |           |          | 
+ company_name          | character varying(255)      |           |          | 
+ subscription_tier     | character varying(50)       |           |          | 'free'::character varying
+ subscription_status   | character varying(50)       |           |          | 'active'::character varying
+ billing_cycle         | date                        |           |          | 
+ credits_remaining     | integer                     |           |          | 10
+ lifetime_credits_used | integer                     |           |          | 0
+ created_at            | timestamp without time zone |           |          | CURRENT_TIMESTAMP
+ last_active           | timestamp without time zone |           |          | 
+ last_login_ip         | inet                        |           |          | 
+ preferences           | jsonb                       |           |          | 
+Indexes:
+    "creators_pkey" PRIMARY KEY, btree (id)
+    "creators_email_key" UNIQUE CONSTRAINT, btree (email)
+    "idx_creators_email" btree (email)
+    "idx_creators_tier_status" btree (subscription_tier, subscription_status)
+Referenced by:
+    TABLE "audit_logs" CONSTRAINT "audit_logs_creator_id_fkey" FOREIGN KEY (creator_id) REFERENCES creators(id)
+    TABLE "feedback" CONSTRAINT "feedback_creator_id_fkey" FOREIGN KEY (creator_id) REFERENCES creators(id)
+    TABLE "fingerprints" CONSTRAINT "fingerprints_creator_id_fkey" FOREIGN KEY (creator_id) REFERENCES creators(id)
+    TABLE "reports" CONSTRAINT "reports_creator_id_fkey" FOREIGN KEY (creator_id) REFERENCES creators(id)
+    TABLE "submissions" CONSTRAINT "submissions_creator_id_fkey" FOREIGN KEY (creator_id) REFERENCES creators(id) ON DELETE CASCADE
+    TABLE "usage_logs" CONSTRAINT "usage_logs_creator_id_fkey" FOREIGN KEY (creator_id) REFERENCES creators(id)
+

@@ -14,5 +14,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy all Python files
 COPY *.py ./
 
-# Run the worker
-CMD ["python", "worker_pool.py"]
+# Run with unbuffered output to see logs immediately
+CMD ["python", "-u", "worker_pool.py"]
