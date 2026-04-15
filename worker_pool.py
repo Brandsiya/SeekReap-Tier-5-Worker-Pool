@@ -6,7 +6,6 @@ import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 
-# ── Health server ──────────────────────────────────────────────────────────────
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -30,13 +29,10 @@ def run_health_server():
 
 Thread(target=run_health_server, daemon=True).start()
 
-# ── Config ─────────────────────────────────────────────────────────────────────
-
 TIER3_URL   = os.environ.get("TIER3_URL", "https://seekreap-tier-3-dev.fly.dev")
 TIER4_URL   = os.environ.get("TIER4_URL", "https://seekreap-tier-4-dev.fly.dev")
 MAX_RETRIES = 3
 
-# ── DB ─────────────────────────────────────────────────────────────────────────
 
 def get_db():
     url = os.environ.get("DATABASE_URL")
@@ -45,18 +41,14 @@ def get_db():
     return psycopg2.connect(url, connect_timeout=30)
 
 
-# ── Single authoritative state writer ─────────────────────────────────────────
-
 def _set_submission_state(cur, submission_id, status,
                           risk_score=None, risk_level=None,
                           failure_reason=None):
     """
-    Keeps submissions + content_submissions in sync atomically.
-    Guards against regressing a completed/failed row back to an
-    earlier state (e.g. a late duplicate worker picking up the job).
+    Single writer for submissions + content_submissions.
+    Guards against regressing a completed/failed row to an earlier state.
     Caller must conn.commit() after this.
     """
-    # ── submissions ───────────────────────────────────────────────────────────
     if status == "completed":
         cur.execute(
             """
@@ -102,7 +94,6 @@ def _set_submission_state(cur, submission_id, status,
             (status, submission_id),
         )
 
-    # ── content_submissions — UPSERT, never regress ───────────────────────────
     cur.execute(
         """
         INSERT INTO content_submissions (submission_id, status, updated_at)
@@ -117,11 +108,9 @@ def _set_submission_state(cur, submission_id, status,
     )
 
 
-# ── Job processor ──────────────────────────────────────────────────────────────
-
 def process_job(job_id, submission_id):
     """
-    Returns one of: 'success' | 'retry' | 'failed'
+    Returns: 'success' | 'retry' | 'failed'
     Never raises — all exceptions are caught and mapped to 'failed'.
     """
     print(f"Processing job {job_id} for submission {submission_id}")
@@ -131,11 +120,9 @@ def process_job(job_id, submission_id):
         conn = get_db()
         cur  = conn.cursor()
 
-        # ── Mark processing ───────────────────────────────────────────────────
         _set_submission_state(cur, submission_id, "processing")
         conn.commit()
 
-        # ── Fetch submission details ──────────────────────────────────────────
         cur.execute(
             "SELECT content_hash, work_type, plan, title FROM submissions WHERE id = %s",
             (submission_id,),
@@ -172,7 +159,6 @@ def process_job(job_id, submission_id):
             },
         }
 
-        # ── Call Tier-3 (stateless compute) ───────────────────────────────────
         resp    = None
         ok      = False
         t3_data = {}
@@ -191,7 +177,6 @@ def process_job(job_id, submission_id):
             ok      = True
             t3_data = {"risk_score": 0, "risk_level": "low"}
 
-        # ── Tier-5 is sole DB writer — update ALL tables atomically ───────────
         if ok:
             risk_score = t3_data.get("risk_score", 0)
             risk_level = t3_data.get("risk_level", "low")
@@ -215,7 +200,6 @@ def process_job(job_id, submission_id):
             return "success"
 
         else:
-            # ── Retry logic ───────────────────────────────────────────────────
             cur.execute(
                 """
                 UPDATE job_queue
@@ -278,8 +262,6 @@ def process_job(job_id, submission_id):
                 pass
 
 
-# ── Main loop ──────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     print("SeekReap Tier-5 Worker starting...")
 
@@ -311,7 +293,6 @@ if __name__ == "__main__":
                 job_id, submission_id = job
                 print(f"Found job {job_id}")
 
-                # Claim job, release lock before Tier-3 HTTP call
                 cur.execute(
                     """
                     UPDATE job_queue
@@ -329,10 +310,6 @@ if __name__ == "__main__":
 
                 result = process_job(job_id, str(submission_id))
 
-                # Safety net: only fires if process_job returned 'failed'
-                # (or None from an unhandled path) AND the queue row was
-                # never updated — i.e. it is still stuck in 'processing'.
-                # Does NOT fire on 'retry' so requeue logic is preserved.
                 if result in ("failed", None):
                     try:
                         conn2 = get_db()
