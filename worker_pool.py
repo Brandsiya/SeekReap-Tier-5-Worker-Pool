@@ -94,18 +94,30 @@ def _set_submission_state(cur, submission_id, status,
             (status, submission_id),
         )
 
-    cur.execute(
-        """
-        INSERT INTO content_submissions (submission_id, status, updated_at)
-        VALUES (%s, %s, NOW())
-        ON CONFLICT (submission_id)
-        DO UPDATE SET
-            status     = EXCLUDED.status,
-            updated_at = NOW()
-        WHERE content_submissions.status NOT IN ('completed', 'failed')
-        """,
-        (submission_id, status),
-    )
+    if status == "completed" and risk_score is not None:
+        cur.execute(
+            """
+            UPDATE content_submissions
+            SET status             = %s,
+                overall_risk_score = %s,
+                risk_level         = %s,
+                updated_at         = NOW()
+            WHERE submission_id = %s
+              AND status NOT IN ('completed', 'failed')
+            """,
+            (status, risk_score, risk_level, submission_id),
+        )
+    else:
+        cur.execute(
+            """
+            UPDATE content_submissions
+            SET status     = %s,
+                updated_at = NOW()
+            WHERE submission_id = %s
+              AND status NOT IN ('completed', 'failed')
+            """,
+            (status, submission_id),
+        )
 
 
 def process_job(job_id, submission_id):
