@@ -29,8 +29,9 @@ def run_health_server():
 
 Thread(target=run_health_server, daemon=True).start()
 
-TIER3_URL = os.environ.get("TIER3_URL", "https://seekreap-tier-3-dev.fly.dev")
-TIER4_URL = os.environ.get("TIER4_URL", "https://seekreap-tier-4-dev.fly.dev")
+TIER3_URL   = os.environ.get("TIER3_URL", "https://seekreap-tier-3-dev.fly.dev")
+TIER4_URL   = os.environ.get("TIER4_URL", "https://seekreap-tier-4-dev.fly.dev")
+MAX_RETRIES = 3
 
 
 def get_db():
@@ -44,17 +45,19 @@ def _set_submission_state(cur, submission_id, status,
                           risk_score=None, risk_level=None,
                           failure_reason=None):
     """
-    Single helper that keeps submissions + content_submissions in sync.
-    Call this instead of writing to either table directly.
+    Single writer for submissions + content_submissions.
+    Always keeps both tables in sync atomically.
+    Caller must conn.commit() after this.
     """
+    # ── submissions ───────────────────────────────────────────────────────
     if status == "completed":
         cur.execute(
             """
             UPDATE submissions
-            SET status = 'completed',
-                completed_at = NOW(),
+            SET status            = 'completed',
+                completed_at      = NOW(),
                 overall_risk_score = %s,
-                risk_level = %s
+                risk_level        = %s
             WHERE id = %s
             """,
             (risk_score, risk_level, submission_id),
@@ -63,7 +66,7 @@ def _set_submission_state(cur, submission_id, status,
         cur.execute(
             """
             UPDATE submissions
-            SET status = 'failed',
+            SET status         = 'failed',
                 failure_reason = %s
             WHERE id = %s
             """,
@@ -80,10 +83,17 @@ def _set_submission_state(cur, submission_id, status,
             (status, submission_id),
         )
 
-    # Mirror every transition to content_submissions
+    # ── content_submissions — UPSERT so a missing row never causes drift ──
     cur.execute(
-        "UPDATE content_submissions SET status = %s WHERE submission_id = %s",
-        (status, submission_id),
+        """
+        INSERT INTO content_submissions (submission_id, status, updated_at)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (submission_id)
+        DO UPDATE SET
+            status     = EXCLUDED.status,
+            updated_at = NOW()
+        """,
+        (submission_id, status),
     )
 
 
@@ -95,18 +105,25 @@ def process_job(job_id, submission_id):
         conn = get_db()
         cur  = conn.cursor()
 
-        # ── Mark processing ───────────────────────────────────────────────
+        # ── Mark processing (both tables) ─────────────────────────────────
         _set_submission_state(cur, submission_id, "processing")
         conn.commit()
 
-        # ── Fetch submission details ──────────────────────────────────────
+        # ── Fetch submission details ───────────────────────────────────────
         cur.execute(
             "SELECT content_hash, work_type, plan, title FROM submissions WHERE id = %s",
             (submission_id,),
         )
         sub = cur.fetchone()
         if not sub:
-            print(f"Submission {submission_id} not found in DB")
+            reason = f"submission {submission_id} not found in DB"
+            print(reason)
+            _set_submission_state(cur, submission_id, "failed", failure_reason=reason)
+            cur.execute(
+                "UPDATE job_queue SET status='failed', failure_reason=%s WHERE job_id=%s",
+                (reason, job_id),
+            )
+            conn.commit()
             return False
 
         content_hash, work_type, plan, title = sub
@@ -129,19 +146,27 @@ def process_job(job_id, submission_id):
             },
         }
 
-        # ── Call Tier 3 (stateless compute) ──────────────────────────────
+        # ── Call Tier 3 (stateless compute only) ──────────────────────────
+        ok      = False
+        t3_data = {}
         try:
-            resp    = requests.post(f"{TIER3_URL}/api/analyze", json=payload, timeout=30)
-            ok      = resp.status_code == 200
-            t3_data = resp.json() if ok else {}
-            if not ok:
+            resp = requests.post(f"{TIER3_URL}/api/analyze", json=payload, timeout=30)
+            if resp.status_code == 200:
+                try:
+                    t3_data = resp.json()
+                    ok      = True
+                except Exception:
+                    print(f"Invalid JSON from Tier-3: {resp.text[:200]}")
+            else:
                 print(f"Tier-3 HTTP {resp.status_code}: {resp.text[:200]}")
         except Exception as ex:
+            # Tier-3 unreachable: complete with safe defaults (MVP decision —
+            # swap to ok=False here if you want strict verification instead)
             print(f"Tier-3 unreachable: {ex} — completing with default low-risk")
             ok      = True
             t3_data = {"risk_score": 0, "risk_level": "low"}
 
-        # ── Tier-5 is sole writer — update ALL tables atomically ──────────
+        # ── Tier-5 is sole DB writer — all tables updated atomically ──────
         if ok:
             risk_score = t3_data.get("risk_score", 0)
             risk_level = t3_data.get("risk_level", "low")
@@ -151,25 +176,57 @@ def process_job(job_id, submission_id):
                 risk_score=risk_score,
                 risk_level=risk_level,
             )
-            # job_queue follows the same transition
             cur.execute(
-                "UPDATE job_queue SET status = 'completed', completed_at = NOW() WHERE job_id = %s",
+                """
+                UPDATE job_queue
+                SET status       = 'completed',
+                    completed_at = NOW()
+                WHERE job_id = %s
+                """,
                 (job_id,),
             )
             conn.commit()
             print(f"Job {job_id} completed — plan={plan} risk={risk_score}")
             return True
+
         else:
-            reason = f"Tier-3 HTTP {resp.status_code}"
-            _set_submission_state(
-                cur, submission_id, "failed", failure_reason=reason
-            )
+            # ── Retry logic ───────────────────────────────────────────────
             cur.execute(
-                "UPDATE job_queue SET status = 'failed', failure_reason = %s WHERE job_id = %s",
-                (reason, job_id),
+                """
+                UPDATE job_queue
+                SET attempts = attempts + 1
+                WHERE job_id = %s
+                RETURNING attempts
+                """,
+                (job_id,),
             )
-            conn.commit()
-            print(f"Job {job_id} failed: {reason}")
+            attempts = cur.fetchone()[0]
+            reason   = f"Tier-3 HTTP {resp.status_code}"
+
+            if attempts < MAX_RETRIES:
+                # Re-queue for retry; leave submission as processing
+                cur.execute(
+                    "UPDATE job_queue SET status='pending' WHERE job_id=%s",
+                    (job_id,),
+                )
+                conn.commit()
+                print(f"Job {job_id} attempt {attempts}/{MAX_RETRIES} — re-queued")
+            else:
+                _set_submission_state(
+                    cur, submission_id, "failed", failure_reason=reason
+                )
+                cur.execute(
+                    """
+                    UPDATE job_queue
+                    SET status         = 'failed',
+                        failure_reason = %s
+                    WHERE job_id = %s
+                    """,
+                    (reason, job_id),
+                )
+                conn.commit()
+                print(f"Job {job_id} permanently failed after {attempts} attempts: {reason}")
+
             return False
 
     except Exception as e:
@@ -226,10 +283,14 @@ if __name__ == "__main__":
                 job_id, submission_id = job
                 print(f"Found job {job_id}")
 
-                # Claim the job before releasing the connection
+                # Claim job and release lock before the Tier-3 HTTP call
                 cur.execute(
-                    "UPDATE job_queue SET status = 'processing', "
-                    "processing_started_at = NOW() WHERE job_id = %s",
+                    """
+                    UPDATE job_queue
+                    SET status               = 'processing',
+                        processing_started_at = NOW()
+                    WHERE job_id = %s
+                    """,
                     (job_id,),
                 )
                 conn.commit()
@@ -240,9 +301,9 @@ if __name__ == "__main__":
 
                 success = process_job(job_id, str(submission_id))
 
-                # process_job writes its own final status, but guard
-                # against the edge case where it returned False without
-                # updating the queue (e.g. exception before first commit).
+                # Safety net: if process_job returned False without updating
+                # the queue (exception before first commit), force it to failed
+                # so the row never stays stuck in 'processing'.
                 if not success:
                     try:
                         conn2 = get_db()
@@ -250,9 +311,10 @@ if __name__ == "__main__":
                         cur2.execute(
                             """
                             UPDATE job_queue
-                            SET status = 'failed',
-                                failure_reason = 'process_job returned False'
-                            WHERE job_id = %s AND status = 'processing'
+                            SET status         = 'failed',
+                                failure_reason = 'process_job returned False without updating queue'
+                            WHERE job_id = %s
+                              AND status   = 'processing'
                             """,
                             (job_id,),
                         )
