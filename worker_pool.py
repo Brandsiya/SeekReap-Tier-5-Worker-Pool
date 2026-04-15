@@ -6,6 +6,7 @@ import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 
+# ── Health server ──────────────────────────────────────────────────────────────
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -29,10 +30,13 @@ def run_health_server():
 
 Thread(target=run_health_server, daemon=True).start()
 
+# ── Config ─────────────────────────────────────────────────────────────────────
+
 TIER3_URL   = os.environ.get("TIER3_URL", "https://seekreap-tier-3-dev.fly.dev")
 TIER4_URL   = os.environ.get("TIER4_URL", "https://seekreap-tier-4-dev.fly.dev")
 MAX_RETRIES = 3
 
+# ── DB ─────────────────────────────────────────────────────────────────────────
 
 def get_db():
     url = os.environ.get("DATABASE_URL")
@@ -41,24 +45,28 @@ def get_db():
     return psycopg2.connect(url, connect_timeout=30)
 
 
+# ── Single authoritative state writer ─────────────────────────────────────────
+
 def _set_submission_state(cur, submission_id, status,
                           risk_score=None, risk_level=None,
                           failure_reason=None):
     """
-    Single writer for submissions + content_submissions.
-    Always keeps both tables in sync atomically.
+    Keeps submissions + content_submissions in sync atomically.
+    Guards against regressing a completed/failed row back to an
+    earlier state (e.g. a late duplicate worker picking up the job).
     Caller must conn.commit() after this.
     """
-    # ── submissions ───────────────────────────────────────────────────────
+    # ── submissions ───────────────────────────────────────────────────────────
     if status == "completed":
         cur.execute(
             """
             UPDATE submissions
-            SET status            = 'completed',
-                completed_at      = NOW(),
+            SET status             = 'completed',
+                completed_at       = NOW(),
                 overall_risk_score = %s,
-                risk_level        = %s
+                risk_level         = %s
             WHERE id = %s
+              AND status NOT IN ('completed', 'failed')
             """,
             (risk_score, risk_level, submission_id),
         )
@@ -69,21 +77,32 @@ def _set_submission_state(cur, submission_id, status,
             SET status         = 'failed',
                 failure_reason = %s
             WHERE id = %s
+              AND status NOT IN ('completed', 'failed')
             """,
             (failure_reason, submission_id),
         )
     elif status == "processing":
         cur.execute(
-            "UPDATE submissions SET status = 'processing' WHERE id = %s",
+            """
+            UPDATE submissions
+            SET status = 'processing'
+            WHERE id = %s
+              AND status NOT IN ('completed', 'failed')
+            """,
             (submission_id,),
         )
     else:
         cur.execute(
-            "UPDATE submissions SET status = %s WHERE id = %s",
+            """
+            UPDATE submissions
+            SET status = %s
+            WHERE id = %s
+              AND status NOT IN ('completed', 'failed')
+            """,
             (status, submission_id),
         )
 
-    # ── content_submissions — UPSERT so a missing row never causes drift ──
+    # ── content_submissions — UPSERT, never regress ───────────────────────────
     cur.execute(
         """
         INSERT INTO content_submissions (submission_id, status, updated_at)
@@ -92,12 +111,19 @@ def _set_submission_state(cur, submission_id, status,
         DO UPDATE SET
             status     = EXCLUDED.status,
             updated_at = NOW()
+        WHERE content_submissions.status NOT IN ('completed', 'failed')
         """,
         (submission_id, status),
     )
 
 
+# ── Job processor ──────────────────────────────────────────────────────────────
+
 def process_job(job_id, submission_id):
+    """
+    Returns one of: 'success' | 'retry' | 'failed'
+    Never raises — all exceptions are caught and mapped to 'failed'.
+    """
     print(f"Processing job {job_id} for submission {submission_id}")
     conn = None
     cur  = None
@@ -105,11 +131,11 @@ def process_job(job_id, submission_id):
         conn = get_db()
         cur  = conn.cursor()
 
-        # ── Mark processing (both tables) ─────────────────────────────────
+        # ── Mark processing ───────────────────────────────────────────────────
         _set_submission_state(cur, submission_id, "processing")
         conn.commit()
 
-        # ── Fetch submission details ───────────────────────────────────────
+        # ── Fetch submission details ──────────────────────────────────────────
         cur.execute(
             "SELECT content_hash, work_type, plan, title FROM submissions WHERE id = %s",
             (submission_id,),
@@ -124,7 +150,7 @@ def process_job(job_id, submission_id):
                 (reason, job_id),
             )
             conn.commit()
-            return False
+            return "failed"
 
         content_hash, work_type, plan, title = sub
         content_hash = content_hash or "unknown"
@@ -146,7 +172,8 @@ def process_job(job_id, submission_id):
             },
         }
 
-        # ── Call Tier 3 (stateless compute only) ──────────────────────────
+        # ── Call Tier-3 (stateless compute) ───────────────────────────────────
+        resp    = None
         ok      = False
         t3_data = {}
         try:
@@ -156,17 +183,15 @@ def process_job(job_id, submission_id):
                     t3_data = resp.json()
                     ok      = True
                 except Exception:
-                    print(f"Invalid JSON from Tier-3: {resp.text[:200]}")
+                    print(f"Tier-3 invalid JSON: {resp.text[:200]}")
             else:
                 print(f"Tier-3 HTTP {resp.status_code}: {resp.text[:200]}")
         except Exception as ex:
-            # Tier-3 unreachable: complete with safe defaults (MVP decision —
-            # swap to ok=False here if you want strict verification instead)
             print(f"Tier-3 unreachable: {ex} — completing with default low-risk")
             ok      = True
             t3_data = {"risk_score": 0, "risk_level": "low"}
 
-        # ── Tier-5 is sole DB writer — all tables updated atomically ──────
+        # ── Tier-5 is sole DB writer — update ALL tables atomically ───────────
         if ok:
             risk_score = t3_data.get("risk_score", 0)
             risk_level = t3_data.get("risk_level", "low")
@@ -187,10 +212,10 @@ def process_job(job_id, submission_id):
             )
             conn.commit()
             print(f"Job {job_id} completed — plan={plan} risk={risk_score}")
-            return True
+            return "success"
 
         else:
-            # ── Retry logic ───────────────────────────────────────────────
+            # ── Retry logic ───────────────────────────────────────────────────
             cur.execute(
                 """
                 UPDATE job_queue
@@ -201,16 +226,18 @@ def process_job(job_id, submission_id):
                 (job_id,),
             )
             attempts = cur.fetchone()[0]
-            reason   = f"Tier-3 HTTP {resp.status_code}"
+            reason   = (
+                f"Tier-3 HTTP {resp.status_code}" if resp else "Tier-3 unreachable"
+            )
 
             if attempts < MAX_RETRIES:
-                # Re-queue for retry; leave submission as processing
                 cur.execute(
                     "UPDATE job_queue SET status='pending' WHERE job_id=%s",
                     (job_id,),
                 )
                 conn.commit()
                 print(f"Job {job_id} attempt {attempts}/{MAX_RETRIES} — re-queued")
+                return "retry"
             else:
                 _set_submission_state(
                     cur, submission_id, "failed", failure_reason=reason
@@ -226,19 +253,18 @@ def process_job(job_id, submission_id):
                 )
                 conn.commit()
                 print(f"Job {job_id} permanently failed after {attempts} attempts: {reason}")
-
-            return False
+                return "failed"
 
     except Exception as e:
-        print(f"Job {job_id} error: {e}")
         import traceback
+        print(f"Job {job_id} error: {e}")
         traceback.print_exc()
         if conn:
             try:
                 conn.rollback()
             except Exception:
                 pass
-        return False
+        return "failed"
     finally:
         if cur:
             try:
@@ -251,6 +277,8 @@ def process_job(job_id, submission_id):
             except Exception:
                 pass
 
+
+# ── Main loop ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("SeekReap Tier-5 Worker starting...")
@@ -283,11 +311,11 @@ if __name__ == "__main__":
                 job_id, submission_id = job
                 print(f"Found job {job_id}")
 
-                # Claim job and release lock before the Tier-3 HTTP call
+                # Claim job, release lock before Tier-3 HTTP call
                 cur.execute(
                     """
                     UPDATE job_queue
-                    SET status               = 'processing',
+                    SET status                = 'processing',
                         processing_started_at = NOW()
                     WHERE job_id = %s
                     """,
@@ -299,12 +327,13 @@ if __name__ == "__main__":
                 cur  = None
                 conn = None
 
-                success = process_job(job_id, str(submission_id))
+                result = process_job(job_id, str(submission_id))
 
-                # Safety net: if process_job returned False without updating
-                # the queue (exception before first commit), force it to failed
-                # so the row never stays stuck in 'processing'.
-                if not success:
+                # Safety net: only fires if process_job returned 'failed'
+                # (or None from an unhandled path) AND the queue row was
+                # never updated — i.e. it is still stuck in 'processing'.
+                # Does NOT fire on 'retry' so requeue logic is preserved.
+                if result in ("failed", None):
                     try:
                         conn2 = get_db()
                         cur2  = conn2.cursor()
@@ -312,7 +341,7 @@ if __name__ == "__main__":
                             """
                             UPDATE job_queue
                             SET status         = 'failed',
-                                failure_reason = 'process_job returned False without updating queue'
+                                failure_reason = 'process_job returned failed without updating queue'
                             WHERE job_id = %s
                               AND status   = 'processing'
                             """,
@@ -323,6 +352,7 @@ if __name__ == "__main__":
                         conn2.close()
                     except Exception:
                         pass
+
             else:
                 print("No pending jobs, sleeping 10s...")
                 cur.close()
