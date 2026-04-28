@@ -163,6 +163,7 @@ def process_job(job_id, submission_id):
                         overall_risk_score = %s,
                         risk_level = %s,
                         status = 'completed',
+        _trigger_tier7_audit(submission_id)  # Tier-7 audit
                         completed_at = NOW()
                     WHERE id = %s
                 """, (
@@ -215,6 +216,36 @@ def process_job(job_id, submission_id):
             except Exception:
                 pass
 
+
+
+# ── Tier-7 audit trigger ─────────────────────────────────────────────────────
+def _trigger_tier7_audit(submission_id):
+    """
+    Non-blocking fire-and-forget POST to Tier-7 after a job completes.
+    Fails silently so Tier-5 is never blocked by Tier-7 unavailability.
+    """
+    import threading
+    import urllib.request, urllib.error, json as _json
+
+    def _post():
+        tier7_url    = os.environ.get('TIER7_URL', '')
+        tier7_secret = os.environ.get('TIER7_SECRET', 'seekreap-tier7-internal')
+        if not tier7_url:
+            return
+        try:
+            body = _json.dumps({'submission_id': str(submission_id)}).encode()
+            req  = urllib.request.Request(
+                tier7_url.rstrip('/') + '/api/audit/trigger',
+                data=body,
+                headers={'Content-Type': 'application/json',
+                         'x-tier7-secret': tier7_secret},
+                method='POST'
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except Exception:
+            pass
+
+    threading.Thread(target=_post, daemon=True).start()
 
 if __name__ == "__main__":
     print("🚀 SeekReap Tier-5 Worker starting...")
