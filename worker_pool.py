@@ -3,7 +3,7 @@ import json
 import time
 import psycopg2
 import requests
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 
 
@@ -30,7 +30,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
     print(f"✅ Health server on port {port}")
     server.serve_forever()
 
