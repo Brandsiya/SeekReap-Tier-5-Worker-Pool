@@ -1,0 +1,17 @@
+name: Health Check
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # Every 30 minutes
+  workflow_dispatch:
+
+jobs:
+  health:
+    name: Check Service Health
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Check health endpoint
+        run: |
+          curl -f https://seekreap-tier5-worker.fly.dev/health || exit 1
+        timeout-minutes: 1
