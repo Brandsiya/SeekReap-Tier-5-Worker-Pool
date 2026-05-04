@@ -1,19 +1,47 @@
-node_modules/
-*.log
+# Python
 __pycache__/
+*.py[cod]
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Backups
+*.backup
+*.bak
+*~
+
+# Test files
+test_*.py
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Environment
 .env
-google-cloud-sdk-*.tar.gz
-google-cloud-sdk/
-*.backup
-watchdog.sh
-# Google Cloud SDK
-google-cloud-sdk/
-google-cloud-sdk-*.tar.gz
+.env.local
 
-# Backup files
-*.backup
-watchdog.sh
+# Logs
+*.log
 
-# Large local files
-*.tgz
-*.tar.gz
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated files
+*.png
+*.jpg
+*.gif
+
+# Cloud build (not using)
+cloudbuild.yaml
+render.yaml
+
+# Node.js (not needed)
+package.json
+package-lock.json
+node_modules/
