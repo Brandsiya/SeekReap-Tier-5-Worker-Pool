@@ -1,0 +1,39 @@
+# Git
+.git/
+.gitignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.so
+
+# Environment
+.env
+.env.local
+.python-version
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+test_*.py
+*.tmp
+
+# Backups
+*.backup
+*.bak
+*~
+
+# Generated files
+*.png
+*.jpg
+*.gif
