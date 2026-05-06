@@ -173,7 +173,6 @@ def process_job(job_id, submission_id):
                         overall_risk_score = %s,
                         risk_level = %s,
                         status = 'completed',
-        _trigger_tier7_audit(submission_id)  # Tier-7 audit
                         completed_at = NOW()
                     WHERE id = %s
                 """, (
@@ -195,6 +194,32 @@ def process_job(job_id, submission_id):
             
             conn.commit()
             print(f"✅ Job {job_id} completed — plan={plan} risk={risk_score}")
+
+            # Write to certificates table
+            try:
+                cur2 = conn.cursor()
+                cur2.execute("SELECT cert_id, creator_id, plan FROM submissions WHERE id = %s", (submission_id,))
+                sub_row = cur2.fetchone()
+                if sub_row and sub_row[0]:
+                    cert_id, creator_id, sub_plan = sub_row
+                    cur2.execute("""
+                        INSERT INTO certificates (
+                            submission_id, creator_id, cert_id, plan,
+                            status, work_type, issued_at, schema_version
+                        ) VALUES (%s, %s, %s, %s, 'active', %s, NOW(), 'v1.0')
+                        ON CONFLICT (submission_id) DO UPDATE
+                            SET status = 'active', issued_at = NOW()
+                    """, (submission_id, creator_id, cert_id, sub_plan or plan, work_type))
+                    conn.commit()
+                    print(f"📜 Certificate written: {cert_id}")
+                cur2.close()
+            except Exception as cert_err:
+                print(f"⚠️ Certificate write failed (non-fatal): {cert_err}")
+                try: conn.rollback()
+                except: pass
+
+            # Trigger Tier-7 audit after successful commit
+            _trigger_tier7_audit(submission_id)
             return True
         else:
             reason = f"Tier-3 HTTP {resp.status_code}"
