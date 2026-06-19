@@ -173,7 +173,8 @@ def process_job(job_id, submission_id):
                         overall_risk_score = %s,
                         risk_level = %s,
                         status = 'completed',
-                        completed_at = NOW()
+                        completed_at = NOW(),
+                        submitted_at = COALESCE(submitted_at, NOW())
                     WHERE id = %s
                 """, (
                     json.dumps(fingerprint),
@@ -188,7 +189,8 @@ def process_job(job_id, submission_id):
                     SET overall_risk_score = %s,
                         risk_level = %s,
                         status = 'completed',
-                        completed_at = NOW()
+                        completed_at = NOW(),
+                        submitted_at = COALESCE(submitted_at, NOW())
                     WHERE id = %s
                 """, (risk_score, risk_level, submission_id))
             
