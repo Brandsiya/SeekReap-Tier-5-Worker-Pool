@@ -37,7 +37,7 @@ def run_health_server():
 
 Thread(target=run_health_server, daemon=True).start()
 
-TIER3_URL = os.environ.get('TIER3_URL', 'https://seekreap-tier-3-dev.fly.dev')
+TIER3_URL = os.environ.get('TIER3_URL', 'https://seekreap-tier-3-private-10.onrender.com')
 TIER4_URL = os.environ.get('TIER4_URL', 'https://seekreap-tier-4-dev.fly.dev')
 
 
