@@ -45,7 +45,15 @@ def get_db():
     url = os.environ.get('DATABASE_URL')
     if not url:
         raise ValueError("DATABASE_URL not set")
-    return psycopg2.connect(url, connect_timeout=30)
+    return psycopg2.connect(
+        url,
+        connect_timeout=30,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+        sslmode='require',
+    )
 
 
 def generate_perceptual_fingerprint(file_url, file_type, content_hash, content_text=None):
@@ -343,4 +351,11 @@ if __name__ == "__main__":
 
         except Exception as e:
             print(f"⚠️ Main loop error: {e}")
+            try:
+                if cur: cur.close()
+            except Exception: pass
+            try:
+                if conn: conn.close()
+            except Exception: pass
+            time.sleep(3)  # back off before retrying connection
             time.sleep(2)
