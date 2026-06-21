@@ -304,17 +304,23 @@ if __name__ == "__main__":
         print(f"❌ DB connection failed: {e}")
 
     heartbeat_counter = 0
-    
+    persistent_conn = [None]
+
+    def _get_persistent_conn():
+        if persistent_conn[0] is None or persistent_conn[0].closed:
+            persistent_conn[0] = get_db()
+            persistent_conn[0].autocommit = False
+        return persistent_conn[0]
+
     while True:
         try:
-            conn = get_db()
+            conn = _get_persistent_conn()
             cur = conn.cursor()
-            
-            # Heartbeat every 10 loops (20 seconds)
+
             heartbeat_counter += 1
             if heartbeat_counter % 10 == 0:
                 print(f"💓 heartbeat: worker alive (loop {heartbeat_counter})")
-            
+
             cur.execute("""
                 SELECT job_id, submission_id FROM job_queue
                 WHERE status = 'pending'
@@ -330,11 +336,10 @@ if __name__ == "__main__":
                 cur.execute("UPDATE job_queue SET status='processing' WHERE job_id=%s", (job_id,))
                 conn.commit()
                 cur.close()
-                conn.close()
 
                 success = process_job(job_id, str(submission_id))
 
-                conn2 = get_db()
+                conn2 = _get_persistent_conn()
                 cur2 = conn2.cursor()
                 cur2.execute(
                     "UPDATE job_queue SET status=%s WHERE job_id=%s",
@@ -342,20 +347,18 @@ if __name__ == "__main__":
                 )
                 conn2.commit()
                 cur2.close()
-                conn2.close()
-                print("💤 No pending jobs, sleeping 2s...")
+                print(f"✅ Job {job_id} marked {'completed' if success else 'failed'}")
             else:
-                # Short sleep with heartbeat - prevents Fly from killing
+                cur.close()
                 print("polling job queue...")
                 time.sleep(2)
 
         except Exception as e:
             print(f"⚠️ Main loop error: {e}")
             try:
-                if cur: cur.close()
-            except Exception: pass
-            try:
-                if conn: conn.close()
-            except Exception: pass
-            time.sleep(3)  # back off before retrying connection
-            time.sleep(2)
+                if persistent_conn[0]:
+                    persistent_conn[0].close()
+            except Exception:
+                pass
+            persistent_conn[0] = None
+            time.sleep(3)
