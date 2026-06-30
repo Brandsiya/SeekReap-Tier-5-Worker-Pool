@@ -142,9 +142,13 @@ def process_job(job_id, submission_id):
             },
         }
 
-        # Call Tier-3 for analysis
+        # Call Tier-3 for analysis — retry once on transient 429
         try:
             resp = requests.post(f"{TIER3_URL}/api/analyze", json=payload, timeout=30)
+            if resp.status_code == 429:
+                print(f"⚠️ Tier-3 429 rate limited, retrying in 4s...")
+                time.sleep(4)
+                resp = requests.post(f"{TIER3_URL}/api/analyze", json=payload, timeout=30)
             ok = resp.status_code == 200
             t3_data = resp.json() if ok else {}
         except Exception as ex:
