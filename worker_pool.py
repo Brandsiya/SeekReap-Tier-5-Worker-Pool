@@ -115,7 +115,7 @@ def process_job(job_id, submission_id):
 
         # Fetch submission details
         cur.execute(
-            "SELECT content_hash, work_type, plan, title FROM submissions WHERE id = %s",
+            "SELECT content_hash, work_type, plan, title, content_url FROM submissions WHERE id = %s",
             (submission_id,)
         )
         sub = cur.fetchone()
@@ -127,6 +127,10 @@ def process_job(job_id, submission_id):
         work_type = sub[1] or "other"
         plan = sub[2] or "free"
         title = sub[3] or "Untitled"
+        content_url = sub[4] or None
+        # Placeholder URIs (seekreap://local/...) aren't fetchable — treat as absent
+        if content_url and not content_url.startswith(("http://", "https://")):
+            content_url = None
 
         payload = {
             "submission_id": submission_id,
@@ -157,8 +161,9 @@ def process_job(job_id, submission_id):
             t3_data = {"risk_score": 0, "risk_level": "low"}
 
         if ok:
-            # Generate perceptual fingerprint
-            fingerprint = generate_perceptual_fingerprint(None, work_type, content_hash, title)
+            # Generate perceptual fingerprint (real file URL when we have one;
+            # falls back to title-text fingerprinting inside Tier-3 if not)
+            fingerprint = generate_perceptual_fingerprint(content_url, work_type, content_hash, title)
             
             # Find similar submissions
             matches = []
