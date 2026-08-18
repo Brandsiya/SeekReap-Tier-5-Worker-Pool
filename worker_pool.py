@@ -331,9 +331,10 @@ if __name__ == "__main__":
                 print(f"💓 heartbeat: worker alive (loop {heartbeat_counter})")
 
             cur.execute("""
-                SELECT job_id, submission_id FROM job_queue
+                SELECT job_id, submission_id
+                FROM job_queue
                 WHERE status = 'pending'
-                ORDER BY created_at
+                ORDER BY priority DESC, created_at ASC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             """)
